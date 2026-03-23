@@ -38,12 +38,15 @@ type LiveEvent = {
   rep_count: number;
   state: string;
   smoothed_elbow_angle?: number | null;
+  smoothed_knee_angle?: number | null;
   latest_prediction?: LatestPrediction;
   camera_angle?: string;
 };
 
-const WS_URL =
+const PUSHUP_WS_URL =
   import.meta.env.VITE_PUSHUP_WS_URL ?? 'ws://127.0.0.1:8000/ws/live/pushup';
+const SQUAT_WS_URL =
+  import.meta.env.VITE_SQUAT_WS_URL ?? 'ws://127.0.0.1:8000/ws/live/squat';
 
 const exercises = ['Push-ups', 'Squats', 'Bicep Curl', 'Dumbbell Lat Raise'];
 
@@ -66,7 +69,9 @@ function buildFeedbackMessages(
   subscription: 'basic' | 'premium' | undefined,
 ): string[] {
   if (exercise !== 'Push-ups') {
-    return ['Push-up live tracking is enabled first. Other exercises are still placeholder flows.'];
+    if (exercise !== 'Squats') {
+      return ['Live backend tracking is currently enabled for push-ups and squats only.'];
+    }
   }
 
   if (!prediction) {
@@ -82,25 +87,48 @@ function buildFeedbackMessages(
     messages.push('Rep detected with low confidence. Check your angle and framing.');
   }
 
-  switch (prediction.predicted_label) {
-    case 'correct':
-      messages.push('Form looks solid. Keep the same tempo and body line.');
-      break;
-    case 'shallow':
-      messages.push('Go lower on the next rep to improve depth.');
-      break;
-    case 'hips_sagging':
-      messages.push('Brace your core and keep your hips from dropping.');
-      break;
-    case 'fatigue':
-      messages.push('Form is deteriorating. Slow down or stop the set soon.');
-      break;
-    default:
-      messages.push(`Prediction: ${prediction.predicted_label}`);
+  if (exercise === 'Push-ups') {
+    switch (prediction.predicted_label) {
+      case 'correct':
+        messages.push('Form looks solid. Keep the same tempo and body line.');
+        break;
+      case 'shallow':
+        messages.push('Go lower on the next rep to improve depth.');
+        break;
+      case 'hips_sagging':
+        messages.push('Brace your core and keep your hips from dropping.');
+        break;
+      case 'fatigue':
+        messages.push('Form is deteriorating. Slow down or stop the set soon.');
+        break;
+      default:
+        messages.push(`Prediction: ${prediction.predicted_label}`);
+    }
+  } else if (exercise === 'Squats') {
+    switch (prediction.predicted_label) {
+      case 'correct':
+        messages.push('Depth and posture look stable. Keep the same rhythm.');
+        break;
+      case 'shallow':
+        messages.push('Sit deeper on the next rep to reach better squat depth.');
+        break;
+      case 'forward_lean':
+        messages.push('Keep your chest up and reduce your forward torso lean.');
+        break;
+      case 'knees_in':
+        messages.push('Drive your knees outward and keep them tracking over your feet.');
+        break;
+      default:
+        messages.push(`Prediction: ${prediction.predicted_label}`);
+    }
   }
 
   if (subscription === 'premium') {
-    messages.push('Premium coaching: aim for smooth top-bottom-top cycles with stable hip height.');
+    messages.push(
+      exercise === 'Squats'
+        ? 'Premium coaching: aim for controlled top-bottom-top cycles with stable knee tracking.'
+        : 'Premium coaching: aim for smooth top-bottom-top cycles with stable hip height.',
+    );
   }
 
   return messages;
@@ -127,7 +155,7 @@ export function LiveTraining() {
   const [feedbackMessages, setFeedbackMessages] = useState<string[]>([]);
   const [trackerState, setTrackerState] = useState('waiting_top');
   const [latestPrediction, setLatestPrediction] = useState<LatestPrediction>(null);
-  const [smoothedElbowAngle, setSmoothedElbowAngle] = useState<number | null>(null);
+  const [smoothedPrimaryAngle, setSmoothedPrimaryAngle] = useState<number | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
   const [backendError, setBackendError] = useState<string>('');
 
@@ -171,7 +199,11 @@ export function LiveTraining() {
     const payload = JSON.parse(raw.data) as LiveEvent;
     setRepCount(payload.rep_count);
     setTrackerState(payload.state);
-    setSmoothedElbowAngle(payload.smoothed_elbow_angle ?? null);
+    setSmoothedPrimaryAngle(
+      selectedExercise === 'Squats'
+        ? (payload.smoothed_knee_angle ?? null)
+        : (payload.smoothed_elbow_angle ?? null),
+    );
 
     if (
       payload.latest_prediction &&
@@ -208,7 +240,9 @@ export function LiveTraining() {
     setBackendError('');
     setConnectionStatus('connecting');
 
-    const websocket = new WebSocket(WS_URL);
+    const websocket = new WebSocket(
+      selectedExercise === 'Squats' ? SQUAT_WS_URL : PUSHUP_WS_URL,
+    );
     socketRef.current = websocket;
 
     websocket.onopen = () => {
@@ -238,15 +272,15 @@ export function LiveTraining() {
   };
 
   const handleStartTracking = () => {
-    if (selectedExercise !== 'Push-ups') {
-      setBackendError('Live backend tracking is currently enabled for push-ups only.');
+    if (selectedExercise !== 'Push-ups' && selectedExercise !== 'Squats') {
+      setBackendError('Live backend tracking is currently enabled for push-ups and squats only.');
       return;
     }
 
     setRepCount(0);
     setCurrentQuality(0);
     setLatestPrediction(null);
-    setSmoothedElbowAngle(null);
+    setSmoothedPrimaryAngle(null);
     setTrackerState('waiting_top');
     setSessionComplete(false);
     setIsTracking(true);
@@ -264,7 +298,11 @@ export function LiveTraining() {
         date: new Date(),
         reps: repCount,
         quality: currentQuality,
-        drift: Number(latestPrediction?.features?.mean_body_alignment_error ?? 0),
+        drift: Number(
+          selectedExercise === 'Squats'
+            ? (latestPrediction?.features?.mean_torso_angle ?? 0)
+            : (latestPrediction?.features?.mean_body_alignment_error ?? 0),
+        ),
       });
       setSessionComplete(true);
     }
@@ -278,7 +316,7 @@ export function LiveTraining() {
     setCurrentQuality(0);
     setFeedbackMessages([]);
     setLatestPrediction(null);
-    setSmoothedElbowAngle(null);
+    setSmoothedPrimaryAngle(null);
     setTrackerState('waiting_top');
     setBackendError('');
     setSessionComplete(false);
@@ -310,6 +348,16 @@ export function LiveTraining() {
       </Badge>
     );
 
+  const angleMetricLabel = selectedExercise === 'Squats' ? 'Knee Angle' : 'Elbow Angle';
+  const cameraCardDescription =
+    selectedExercise === 'Squats'
+      ? 'Side-view squat tracking through the FastAPI backend'
+      : 'Side-view push-up tracking through the FastAPI backend';
+  const latestPredictionEmptyText =
+    selectedExercise === 'Squats'
+      ? 'No completed squat prediction yet.'
+      : 'No completed rep prediction yet.';
+
   return (
     <div className="min-h-screen bg-gray-50">
       <header className="sticky top-0 z-10 border-b bg-white">
@@ -337,7 +385,7 @@ export function LiveTraining() {
               <div className="flex items-center justify-between">
                 <div>
                   <CardTitle>Camera Feed</CardTitle>
-                  <CardDescription>Side-view push-up tracking through the FastAPI backend</CardDescription>
+                  <CardDescription>{cameraCardDescription}</CardDescription>
                 </div>
                 <div className="flex gap-2">
                   <Button
@@ -408,8 +456,8 @@ export function LiveTraining() {
                   <div className="mt-3 flex flex-wrap gap-4 text-xs opacity-80">
                     <span>State: {formatTrackerState(trackerState)}</span>
                     <span>
-                      Elbow Angle:{' '}
-                      {smoothedElbowAngle !== null ? `${Math.round(smoothedElbowAngle)}°` : 'N/A'}
+                      {angleMetricLabel}:{' '}
+                      {smoothedPrimaryAngle !== null ? `${Math.round(smoothedPrimaryAngle)}°` : 'N/A'}
                     </span>
                     <span>
                       Latest Label: {latestPrediction?.predicted_label ?? 'No completed rep yet'}
@@ -480,7 +528,7 @@ export function LiveTraining() {
                 </SelectContent>
               </Select>
               <p className="mt-3 text-xs text-gray-500">
-                Live backend tracking is currently implemented for push-ups only.
+                Live backend tracking is currently implemented for push-ups and squats.
               </p>
             </CardContent>
           </Card>
@@ -543,7 +591,15 @@ export function LiveTraining() {
                   </div>
                   <div className="grid grid-cols-2 gap-2 pt-2 text-xs text-gray-600">
                     <div className="rounded-md bg-gray-100 p-2">
-                      Min angle: {Math.round(Number(latestPrediction.features.min_elbow_angle ?? 0))}°
+                      Min angle:{' '}
+                      {Math.round(
+                        Number(
+                          selectedExercise === 'Squats'
+                            ? (latestPrediction.features.min_knee_angle ?? 0)
+                            : (latestPrediction.features.min_elbow_angle ?? 0),
+                        ),
+                      )}
+                      °
                     </div>
                     <div className="rounded-md bg-gray-100 p-2">
                       Angle drop: {Math.round(Number(latestPrediction.features.angle_drop ?? 0))}°
@@ -552,26 +608,39 @@ export function LiveTraining() {
                       Duration: {Number(latestPrediction.features.rep_duration_sec ?? 0).toFixed(2)}s
                     </div>
                     <div className="rounded-md bg-gray-100 p-2">
-                      Alignment err: {Number(latestPrediction.features.mean_body_alignment_error ?? 0).toFixed(1)}
+                      {selectedExercise === 'Squats'
+                        ? `Torso angle: ${Number(latestPrediction.features.mean_torso_angle ?? 0).toFixed(1)}`
+                        : `Alignment err: ${Number(latestPrediction.features.mean_body_alignment_error ?? 0).toFixed(1)}`}
                     </div>
                   </div>
                 </div>
               ) : (
-                <p className="text-sm text-gray-500">No completed rep prediction yet.</p>
+                <p className="text-sm text-gray-500">{latestPredictionEmptyText}</p>
               )}
             </CardContent>
           </Card>
 
           <Card>
             <CardHeader>
-              <CardTitle>Push-up Guide</CardTitle>
+              <CardTitle>{selectedExercise === 'Squats' ? 'Squat Guide' : 'Push-up Guide'}</CardTitle>
             </CardHeader>
             <CardContent>
               <div className="space-y-2 text-sm">
-                <p>1. Place the camera at your side so your full body is visible.</p>
-                <p>2. Start in a clear top plank position before the first rep.</p>
-                <p>3. Keep your body in one line as you lower and press back up.</p>
-                <p>4. Pause after each set so the app can save the session cleanly.</p>
+                {selectedExercise === 'Squats' ? (
+                  <>
+                    <p>1. Place the camera at your side so your hips, knees, and ankles stay visible.</p>
+                    <p>2. Start in a full standing position before the first rep.</p>
+                    <p>3. Sit down and stand up with controlled tempo on each rep.</p>
+                    <p>4. Keep your knees tracking over your feet and avoid excessive forward lean.</p>
+                  </>
+                ) : (
+                  <>
+                    <p>1. Place the camera at your side so your full body is visible.</p>
+                    <p>2. Start in a clear top plank position before the first rep.</p>
+                    <p>3. Keep your body in one line as you lower and press back up.</p>
+                    <p>4. Pause after each set so the app can save the session cleanly.</p>
+                  </>
+                )}
               </div>
             </CardContent>
           </Card>
