@@ -30,7 +30,7 @@ type LatestPrediction = {
   confidence: number;
   probabilities?: Record<string, number>;
   features: Record<string, number | string>;
-} | null;
+};
 
 type LiveEvent = {
   event: string;
@@ -41,14 +41,52 @@ type LiveEvent = {
   smoothed_knee_angle?: number | null;
   latest_prediction?: LatestPrediction;
   camera_angle?: string;
+  landmarks?: Record<string, [number, number]>;
 };
 
+type CoachingResponse = {
+  exercise: string;
+  predicted_label: string;
+  provider: string;
+  model: string;
+  summary: string;
+  priority: string;
+  cues: string[];
+  safety_note?: string | null;
+};
+
+type VideoPredictionResponse = {
+  rep_count: number;
+  predictions: LatestPrediction[];
+  frames: Array<{
+    frame_idx: number;
+    timestamp_sec: number;
+    landmarks: Record<string, [number, number]>;
+  }>;
+};
+
+const BACKEND_BASE_URL =
+  import.meta.env.VITE_BACKEND_BASE_URL ?? 'http://127.0.0.1:8000';
 const PUSHUP_WS_URL =
   import.meta.env.VITE_PUSHUP_WS_URL ?? 'ws://127.0.0.1:8000/ws/live/pushup';
 const SQUAT_WS_URL =
   import.meta.env.VITE_SQUAT_WS_URL ?? 'ws://127.0.0.1:8000/ws/live/squat';
 
 const exercises = ['Push-ups', 'Squats', 'Bicep Curl', 'Dumbbell Lat Raise'];
+const POSE_CONNECTIONS: Array<[string, string]> = [
+  ['left_shoulder', 'right_shoulder'],
+  ['left_shoulder', 'left_elbow'],
+  ['left_elbow', 'left_wrist'],
+  ['right_shoulder', 'right_elbow'],
+  ['right_elbow', 'right_wrist'],
+  ['left_shoulder', 'left_hip'],
+  ['right_shoulder', 'right_hip'],
+  ['left_hip', 'right_hip'],
+  ['left_hip', 'left_knee'],
+  ['left_knee', 'left_ankle'],
+  ['right_hip', 'right_knee'],
+  ['right_knee', 'right_ankle'],
+];
 
 function formatTrackerState(state: string) {
   switch (state) {
@@ -63,7 +101,7 @@ function formatTrackerState(state: string) {
 
 function buildFeedbackMessages(
   exercise: string,
-  prediction: LatestPrediction,
+  prediction: LatestPrediction | null,
   quality: number,
   trackerState: string,
   subscription: 'basic' | 'premium' | undefined,
@@ -134,30 +172,87 @@ function buildFeedbackMessages(
   return messages;
 }
 
+function aggregateSessionPredictions(predictions: LatestPrediction[]) {
+  if (predictions.length === 0) {
+    return null;
+  }
+
+  const labelCounts: Record<string, number> = {};
+  const numericSums: Record<string, number> = {};
+  const numericCounts: Record<string, number> = {};
+  let confidenceTotal = 0;
+
+  for (const prediction of predictions) {
+    labelCounts[prediction.predicted_label] = (labelCounts[prediction.predicted_label] ?? 0) + 1;
+    confidenceTotal += prediction.confidence;
+
+    Object.entries(prediction.features).forEach(([key, value]) => {
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        numericSums[key] = (numericSums[key] ?? 0) + value;
+        numericCounts[key] = (numericCounts[key] ?? 0) + 1;
+      }
+    });
+  }
+
+  const dominantLabel = Object.entries(labelCounts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? predictions[predictions.length - 1].predicted_label;
+  const meanFeatures: Record<string, number | string> = {};
+  Object.entries(numericSums).forEach(([key, sum]) => {
+    const count = numericCounts[key] ?? 1;
+    meanFeatures[key] = sum / count;
+  });
+
+  meanFeatures.rep_count = predictions.length;
+  meanFeatures.dominant_issue_count = labelCounts[dominantLabel] ?? 0;
+
+  return {
+    rep_index: predictions[predictions.length - 1].rep_index,
+    predicted_label: dominantLabel,
+    confidence: confidenceTotal / predictions.length,
+    features: meanFeatures,
+    sensor_context: {
+      session_rep_count: predictions.length,
+      label_distribution: JSON.stringify(labelCounts),
+      session_mean_confidence: confidenceTotal / predictions.length,
+    },
+  };
+}
+
 export function LiveTraining() {
   const navigate = useNavigate();
   const location = useLocation();
   const { user, addExerciseSession } = useAuth();
 
   const webcamRef = useRef<Webcam>(null);
+  const uploadedVideoRef = useRef<HTMLVideoElement | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const frameIntervalRef = useRef<number | null>(null);
   const frameIdRef = useRef(0);
   const sessionStartRef = useRef<number>(0);
   const isTrackingRef = useRef(false);
+  const predictionHistoryRef = useRef<LatestPrediction[]>([]);
 
   const [selectedExercise, setSelectedExercise] = useState(location.state?.exercise || 'Push-ups');
   const [useWebcam, setUseWebcam] = useState(true);
+  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
+  const [uploadedVideoUrl, setUploadedVideoUrl] = useState<string | null>(null);
+  const [uploadedVideoAspectRatio, setUploadedVideoAspectRatio] = useState<number>(16 / 9);
   const [isTracking, setIsTracking] = useState(false);
   const [sessionComplete, setSessionComplete] = useState(false);
   const [repCount, setRepCount] = useState(0);
   const [currentQuality, setCurrentQuality] = useState(0);
   const [feedbackMessages, setFeedbackMessages] = useState<string[]>([]);
   const [trackerState, setTrackerState] = useState('waiting_top');
-  const [latestPrediction, setLatestPrediction] = useState<LatestPrediction>(null);
+  const [latestPrediction, setLatestPrediction] = useState<LatestPrediction | null>(null);
+  const [liveLandmarks, setLiveLandmarks] = useState<Record<string, [number, number]>>({});
+  const [uploadedFrames, setUploadedFrames] = useState<VideoPredictionResponse['frames']>([]);
+  const [uploadedLandmarks, setUploadedLandmarks] = useState<Record<string, [number, number]>>({});
   const [smoothedPrimaryAngle, setSmoothedPrimaryAngle] = useState<number | null>(null);
+  const [coachResponse, setCoachResponse] = useState<CoachingResponse | null>(null);
+  const [coachLoading, setCoachLoading] = useState(false);
+  const [coachError, setCoachError] = useState('');
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
   const [backendError, setBackendError] = useState<string>('');
+  const [uploadProcessing, setUploadProcessing] = useState(false);
 
   const stopFrameLoop = () => {
     if (frameIntervalRef.current !== null) {
@@ -182,6 +277,30 @@ export function LiveTraining() {
   }, []);
 
   useEffect(() => {
+    if (!uploadedFile) {
+      setUploadedVideoUrl((previousUrl) => {
+        if (previousUrl) {
+          URL.revokeObjectURL(previousUrl);
+        }
+        return null;
+      });
+      return;
+    }
+
+    const nextUrl = URL.createObjectURL(uploadedFile);
+    setUploadedVideoUrl((previousUrl) => {
+      if (previousUrl) {
+        URL.revokeObjectURL(previousUrl);
+      }
+      return nextUrl;
+    });
+
+    return () => {
+      URL.revokeObjectURL(nextUrl);
+    };
+  }, [uploadedFile]);
+
+  useEffect(() => {
     const quality = latestPrediction ? Math.round(latestPrediction.confidence * 100) : 0;
     setCurrentQuality(quality);
     setFeedbackMessages(
@@ -195,10 +314,142 @@ export function LiveTraining() {
     );
   }, [latestPrediction, selectedExercise, trackerState, user?.subscription]);
 
+  const requestCoaching = async (
+    prediction: LatestPrediction,
+    sensorContext: Record<string, number | string> | null = null,
+  ) => {
+    const exerciseSlug = selectedExercise === 'Squats' ? 'squat' : 'pushup';
+    setCoachLoading(true);
+    setCoachError('');
+    try {
+      const response = await fetch(`${BACKEND_BASE_URL}/api/v1/coach/guidance`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+          body: JSON.stringify({
+            exercise: exerciseSlug,
+            rep_index: prediction.rep_index,
+            predicted_label: prediction.predicted_label,
+            confidence: prediction.confidence,
+            features: prediction.features,
+            sensor_context: sensorContext,
+          }),
+        });
+
+      if (!response.ok) {
+        throw new Error(`Coaching request failed with status ${response.status}`);
+      }
+
+      const payload = (await response.json()) as CoachingResponse;
+      setCoachResponse(payload);
+    } catch (error) {
+      setCoachError(error instanceof Error ? error.message : 'Unable to load coaching guidance.');
+    } finally {
+      setCoachLoading(false);
+    }
+  };
+
+  const syncUploadedOverlay = () => {
+    const video = uploadedVideoRef.current;
+    if (!video || uploadedFrames.length === 0) {
+      setUploadedLandmarks({});
+      return;
+    }
+
+    const currentTime = video.currentTime;
+    let bestFrame = uploadedFrames[0];
+    let bestDistance = Math.abs(bestFrame.timestamp_sec - currentTime);
+
+    for (let index = 1; index < uploadedFrames.length; index += 1) {
+      const candidate = uploadedFrames[index];
+      const distance = Math.abs(candidate.timestamp_sec - currentTime);
+      if (distance < bestDistance) {
+        bestFrame = candidate;
+        bestDistance = distance;
+      }
+    }
+
+    setUploadedLandmarks(bestFrame?.landmarks ?? {});
+  };
+
+  const handleUploadedVideoMetadata = () => {
+    const video = uploadedVideoRef.current;
+    if (video && video.videoWidth > 0 && video.videoHeight > 0) {
+      setUploadedVideoAspectRatio(video.videoWidth / video.videoHeight);
+    }
+    syncUploadedOverlay();
+  };
+
+  const runUploadedVideoAnalysis = async () => {
+    if (!uploadedFile) {
+      setBackendError('Choose a video file before starting upload analysis.');
+      return;
+    }
+
+    if (selectedExercise !== 'Push-ups' && selectedExercise !== 'Squats') {
+      setBackendError('Video analysis is currently enabled for push-ups and squats only.');
+      return;
+    }
+
+    const exerciseSlug = selectedExercise === 'Squats' ? 'squat' : 'pushup';
+    const formData = new FormData();
+    formData.append('file', uploadedFile);
+
+    setUploadProcessing(true);
+    setBackendError('');
+    setCoachError('');
+    setCoachResponse(null);
+    setSessionComplete(false);
+    setRepCount(0);
+    setLatestPrediction(null);
+    setCurrentQuality(0);
+    predictionHistoryRef.current = [];
+    setUploadedFrames([]);
+    setUploadedLandmarks({});
+
+    try {
+      const response = await fetch(`${BACKEND_BASE_URL}/api/v1/predict/${exerciseSlug}/video`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Video analysis failed with status ${response.status}`);
+      }
+
+      const payload = (await response.json()) as VideoPredictionResponse;
+      const predictions = payload.predictions ?? [];
+      const frames = payload.frames ?? [];
+      predictionHistoryRef.current = predictions;
+      setRepCount(payload.rep_count ?? predictions.length);
+      setUploadedFrames(frames);
+
+      const lastPrediction = predictions[predictions.length - 1] ?? null;
+      setLatestPrediction(lastPrediction);
+
+      const sessionSummary = aggregateSessionPredictions(predictions);
+      if (sessionSummary) {
+        setCurrentQuality(Math.round(sessionSummary.confidence * 100));
+        await requestCoaching(sessionSummary, sessionSummary.sensor_context);
+      } else {
+        setCurrentQuality(0);
+      }
+
+      setTrackerState('upload_complete');
+      setSessionComplete(true);
+    } catch (error) {
+      setBackendError(error instanceof Error ? error.message : 'Unable to analyze uploaded video.');
+    } finally {
+      setUploadProcessing(false);
+    }
+  };
+
   const handleSocketMessage = (raw: MessageEvent<string>) => {
     const payload = JSON.parse(raw.data) as LiveEvent;
     setRepCount(payload.rep_count);
     setTrackerState(payload.state);
+    setLiveLandmarks(payload.landmarks ?? {});
     setSmoothedPrimaryAngle(
       selectedExercise === 'Squats'
         ? (payload.smoothed_knee_angle ?? null)
@@ -210,6 +461,12 @@ export function LiveTraining() {
       payload.latest_prediction.rep_index !== latestPrediction?.rep_index
     ) {
       setLatestPrediction(payload.latest_prediction);
+      predictionHistoryRef.current = [
+        ...predictionHistoryRef.current.filter(
+          (prediction) => prediction.rep_index !== payload.latest_prediction!.rep_index,
+        ),
+        payload.latest_prediction,
+      ].sort((left, right) => left.rep_index - right.rep_index);
     }
   };
 
@@ -273,16 +530,28 @@ export function LiveTraining() {
 
   const handleStartTracking = () => {
     if (selectedExercise !== 'Push-ups' && selectedExercise !== 'Squats') {
-      setBackendError('Live backend tracking is currently enabled for push-ups and squats only.');
+      setBackendError('Video analysis is currently enabled for push-ups and squats only.');
       return;
     }
 
     setRepCount(0);
     setCurrentQuality(0);
     setLatestPrediction(null);
+    setLiveLandmarks({});
+    setUploadedFrames([]);
+    setUploadedLandmarks({});
+    predictionHistoryRef.current = [];
     setSmoothedPrimaryAngle(null);
+    setCoachResponse(null);
+    setCoachError('');
+    setCoachLoading(false);
     setTrackerState('waiting_top');
     setSessionComplete(false);
+    if (!useWebcam) {
+      void runUploadedVideoAnalysis();
+      return;
+    }
+
     setIsTracking(true);
     isTrackingRef.current = true;
     openSocket();
@@ -293,18 +562,22 @@ export function LiveTraining() {
     isTrackingRef.current = false;
     closeSocket();
     if (repCount > 0) {
+      const sessionSummary = aggregateSessionPredictions(predictionHistoryRef.current);
       addExerciseSession({
         exercise: selectedExercise,
         date: new Date(),
         reps: repCount,
-        quality: currentQuality,
+        quality: sessionSummary ? Math.round(sessionSummary.confidence * 100) : currentQuality,
         drift: Number(
           selectedExercise === 'Squats'
-            ? (latestPrediction?.features?.mean_torso_angle ?? 0)
-            : (latestPrediction?.features?.mean_body_alignment_error ?? 0),
+            ? (sessionSummary?.features?.mean_torso_angle ?? latestPrediction?.features?.mean_torso_angle ?? 0)
+            : (sessionSummary?.features?.mean_body_alignment_error ?? latestPrediction?.features?.mean_body_alignment_error ?? 0),
         ),
       });
       setSessionComplete(true);
+      if (sessionSummary) {
+        void requestCoaching(sessionSummary, sessionSummary.sensor_context);
+      }
     }
   };
 
@@ -316,17 +589,27 @@ export function LiveTraining() {
     setCurrentQuality(0);
     setFeedbackMessages([]);
     setLatestPrediction(null);
+    setLiveLandmarks({});
+    predictionHistoryRef.current = [];
     setSmoothedPrimaryAngle(null);
+    setCoachResponse(null);
+    setCoachError('');
+    setCoachLoading(false);
     setTrackerState('waiting_top');
     setBackendError('');
     setSessionComplete(false);
+    setUploadedFile(null);
+    setUploadedVideoUrl(null);
+    setUploadedVideoAspectRatio(16 / 9);
+    setUploadProcessing(false);
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
       setUseWebcam(false);
-      setBackendError('Video upload UI is still placeholder. Use webcam tracking first.');
+      setUploadedFile(file);
+      setBackendError('');
     }
   };
 
@@ -416,24 +699,115 @@ export function LiveTraining() {
             <CardContent>
               <div className="relative aspect-video overflow-hidden rounded-lg bg-black">
                 {useWebcam ? (
-                  <Webcam
-                    ref={webcamRef}
-                    audio={false}
-                    mirrored
-                    screenshotFormat="image/jpeg"
-                    screenshotQuality={0.7}
-                    className="h-full w-full object-cover"
-                    videoConstraints={{
-                      facingMode: 'user',
-                    }}
-                  />
+                  <>
+                    <Webcam
+                      ref={webcamRef}
+                      audio={false}
+                      mirrored
+                      screenshotFormat="image/jpeg"
+                      screenshotQuality={0.7}
+                      className="h-full w-full object-cover"
+                      videoConstraints={{
+                        facingMode: 'user',
+                      }}
+                    />
+                    {Object.keys(liveLandmarks).length > 0 ? (
+                      <svg
+                        className="pointer-events-none absolute inset-0 h-full w-full"
+                        viewBox="0 0 100 100"
+                        preserveAspectRatio="none"
+                        style={{ transform: 'scaleX(-1)' }}
+                      >
+                        {POSE_CONNECTIONS.map(([startKey, endKey]) => {
+                          const startPoint = liveLandmarks[startKey];
+                          const endPoint = liveLandmarks[endKey];
+                          if (!startPoint || !endPoint) {
+                            return null;
+                          }
+                          return (
+                            <line
+                              key={`${startKey}-${endKey}`}
+                              x1={startPoint[0] * 100}
+                              y1={startPoint[1] * 100}
+                              x2={endPoint[0] * 100}
+                              y2={endPoint[1] * 100}
+                              stroke="rgba(34,197,94,0.9)"
+                              strokeWidth="0.8"
+                            />
+                          );
+                        })}
+                        {Object.entries(liveLandmarks).map(([landmarkName, [x, y]]) => (
+                          <circle
+                            key={landmarkName}
+                            cx={x * 100}
+                            cy={y * 100}
+                            r="1"
+                            fill="rgba(59,130,246,0.95)"
+                            stroke="white"
+                            strokeWidth="0.25"
+                          />
+                        ))}
+                      </svg>
+                    ) : null}
+                  </>
                 ) : (
-                  <div className="flex h-full w-full items-center justify-center text-white">
-                    <div className="text-center">
-                      <Upload className="mx-auto mb-2 h-12 w-12 opacity-50" />
-                      <p>Upload flow not wired yet.</p>
+                  uploadedVideoUrl ? (
+                    <>
+                      <video
+                        ref={uploadedVideoRef}
+                        src={uploadedVideoUrl}
+                        controls
+                        onTimeUpdate={syncUploadedOverlay}
+                        onSeeked={syncUploadedOverlay}
+                        onLoadedMetadata={handleUploadedVideoMetadata}
+                        className="h-full w-full object-contain"
+                      />
+                      {Object.keys(uploadedLandmarks).length > 0 ? (
+                        <svg
+                          className="pointer-events-none absolute inset-0 h-full w-full"
+                          viewBox={`0 0 ${uploadedVideoAspectRatio} 1`}
+                          preserveAspectRatio="xMidYMid meet"
+                        >
+                          {POSE_CONNECTIONS.map(([startKey, endKey]) => {
+                            const startPoint = uploadedLandmarks[startKey];
+                            const endPoint = uploadedLandmarks[endKey];
+                            if (!startPoint || !endPoint) {
+                              return null;
+                            }
+                            return (
+                              <line
+                                key={`${startKey}-${endKey}`}
+                                x1={startPoint[0] * uploadedVideoAspectRatio}
+                                y1={startPoint[1]}
+                                x2={endPoint[0] * uploadedVideoAspectRatio}
+                                y2={endPoint[1]}
+                                stroke="rgba(34,197,94,0.9)"
+                                strokeWidth="0.008"
+                              />
+                            );
+                          })}
+                          {Object.entries(uploadedLandmarks).map(([landmarkName, [x, y]]) => (
+                            <circle
+                              key={landmarkName}
+                              cx={x * uploadedVideoAspectRatio}
+                              cy={y}
+                              r="0.01"
+                              fill="rgba(59,130,246,0.95)"
+                              stroke="white"
+                              strokeWidth="0.0025"
+                            />
+                          ))}
+                        </svg>
+                      ) : null}
+                    </>
+                  ) : (
+                    <div className="flex h-full w-full items-center justify-center text-white">
+                      <div className="text-center">
+                        <Upload className="mx-auto mb-2 h-12 w-12 opacity-50" />
+                        <p>Choose a video to analyze.</p>
+                      </div>
                     </div>
-                  </div>
+                  )
                 )}
 
                 {isTracking && (
@@ -442,18 +816,48 @@ export function LiveTraining() {
                   </div>
                 )}
 
-                <div className="absolute right-4 top-4 rounded-lg bg-black/70 px-5 py-3 text-white">
-                  <div className="text-sm opacity-70">Reps</div>
-                  <div className="text-4xl">{repCount}</div>
-                </div>
+                {useWebcam ? (
+                  <>
+                    <div className="absolute right-4 top-4 rounded-lg bg-black/70 px-5 py-3 text-white">
+                      <div className="text-sm opacity-70">Reps</div>
+                      <div className="text-4xl">{repCount}</div>
+                    </div>
 
-                <div className="absolute bottom-4 left-4 right-4 rounded-lg bg-black/70 p-4 text-white">
-                  <div className="mb-2 flex items-center justify-between text-sm">
+                    <div className="absolute bottom-4 left-4 right-4 rounded-lg bg-black/70 p-4 text-white">
+                      <div className="mb-2 flex items-center justify-between text-sm">
+                        <span>Prediction Confidence</span>
+                        <span>{currentQuality}%</span>
+                      </div>
+                      <Progress value={currentQuality} className="h-2" />
+                      <div className="mt-3 flex flex-wrap gap-4 text-xs opacity-80">
+                        <span>State: {formatTrackerState(trackerState)}</span>
+                        <span>
+                          {angleMetricLabel}:{' '}
+                          {smoothedPrimaryAngle !== null ? `${Math.round(smoothedPrimaryAngle)}°` : 'N/A'}
+                        </span>
+                        <span>
+                          Latest Label: {latestPrediction?.predicted_label ?? 'No completed rep yet'}
+                        </span>
+                      </div>
+                    </div>
+                  </>
+                ) : null}
+              </div>
+
+              {backendError ? (
+                <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                  {backendError}
+                </div>
+              ) : null}
+
+              {!useWebcam ? (
+                <div className="mt-4 rounded-lg border bg-white p-4">
+                  <div className="mb-2 flex items-center justify-between text-sm text-gray-700">
                     <span>Prediction Confidence</span>
                     <span>{currentQuality}%</span>
                   </div>
                   <Progress value={currentQuality} className="h-2" />
-                  <div className="mt-3 flex flex-wrap gap-4 text-xs opacity-80">
+                  <div className="mt-3 flex flex-wrap gap-4 text-xs text-gray-600">
                     <span>State: {formatTrackerState(trackerState)}</span>
                     <span>
                       {angleMetricLabel}:{' '}
@@ -464,19 +868,13 @@ export function LiveTraining() {
                     </span>
                   </div>
                 </div>
-              </div>
-
-              {backendError ? (
-                <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-                  {backendError}
-                </div>
               ) : null}
 
               <div className="mt-4 flex gap-2">
                 {!isTracking ? (
                   <Button onClick={handleStartTracking} className="flex-1">
                     <Play className="mr-2 h-4 w-4" />
-                    Start Tracking
+                    {useWebcam ? 'Start Tracking' : uploadProcessing ? 'Analyzing Video...' : 'Analyze Video'}
                   </Button>
                 ) : (
                   <Button onClick={handleStopTracking} variant="destructive" className="flex-1">
@@ -528,7 +926,7 @@ export function LiveTraining() {
                 </SelectContent>
               </Select>
               <p className="mt-3 text-xs text-gray-500">
-                Live backend tracking is currently implemented for push-ups and squats.
+                Live tracking and uploaded-video analysis are currently implemented for push-ups and squats.
               </p>
             </CardContent>
           </Card>
@@ -536,7 +934,7 @@ export function LiveTraining() {
           <Card>
             <CardHeader>
               <CardTitle>Real-time Feedback</CardTitle>
-              <CardDescription>Direct backend predictions from live webcam frames</CardDescription>
+              <CardDescription>Rule-based live feedback from backend predictions</CardDescription>
             </CardHeader>
             <CardContent>
               <div className="space-y-2">
@@ -567,6 +965,46 @@ export function LiveTraining() {
                   </div>
                 )}
               </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>AI Coaching</CardTitle>
+              <CardDescription>LLM guidance generated from CV features and form predictions</CardDescription>
+            </CardHeader>
+            <CardContent>
+              {coachLoading ? (
+                <p className="text-sm text-gray-500">Generating coaching guidance...</p>
+              ) : coachError ? (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                  {coachError}
+                </div>
+              ) : coachResponse ? (
+                <div className="space-y-3 text-sm">
+                  <div>
+                    <p className="font-medium text-gray-900">{coachResponse.summary}</p>
+                    <p className="mt-1 text-gray-600">{coachResponse.priority}</p>
+                  </div>
+                  <div className="space-y-2">
+                    {coachResponse.cues.map((cue, index) => (
+                      <div key={index} className="rounded-lg bg-blue-50 px-3 py-2 text-blue-900">
+                        {cue}
+                      </div>
+                    ))}
+                  </div>
+                  {coachResponse.safety_note ? (
+                    <div className="rounded-lg bg-amber-50 px-3 py-2 text-amber-900">
+                      {coachResponse.safety_note}
+                    </div>
+                  ) : null}
+                  <div className="text-xs text-gray-500">
+                    Source: {coachResponse.provider === 'openai' ? coachResponse.model : 'Fallback coaching'}
+                  </div>
+                </div>
+              ) : (
+                <p className="text-sm text-gray-500">End the session to generate coaching guidance.</p>
+              )}
             </CardContent>
           </Card>
 
