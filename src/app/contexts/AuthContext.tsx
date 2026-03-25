@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useEffect, useState } from 'react';
 
 interface User {
   id: string;
@@ -35,93 +35,203 @@ interface AuthContextType {
   addExerciseSession: (session: Omit<ExerciseSession, 'id'>) => void;
 }
 
+type BackendUser = {
+  id: string;
+  email: string;
+  name: string;
+  subscription: 'basic' | 'premium';
+  workoutRoutines?: WorkoutRoutine[];
+  exerciseHistory?: ExerciseSession[];
+};
+
+type AuthResponse = {
+  access_token: string;
+  token_type: string;
+  user: BackendUser;
+};
+
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
+const BACKEND_BASE_URL = import.meta.env.VITE_BACKEND_BASE_URL ?? 'http://127.0.0.1:8000';
+const AUTH_TOKEN_KEY = 'smartfit_auth_token';
+const AUTH_USER_KEY = 'smartfit_auth_user';
+
+function normalizeUser(user: BackendUser): User {
+  return {
+    ...user,
+    workoutRoutines: user.workoutRoutines ?? [],
+    exerciseHistory: (user.exerciseHistory ?? []).map((session) => ({
+      ...session,
+      date: new Date(session.date),
+    })),
+  };
+}
+
+function storeAuth(token: string, user: User) {
+  localStorage.setItem(AUTH_TOKEN_KEY, token);
+  localStorage.setItem(AUTH_USER_KEY, JSON.stringify(user));
+}
+
+function clearStoredAuth() {
+  localStorage.removeItem(AUTH_TOKEN_KEY);
+  localStorage.removeItem(AUTH_USER_KEY);
+}
+
+async function parseError(response: Response): Promise<string> {
+  try {
+    const payload = await response.json();
+    return payload.detail ?? 'Request failed';
+  } catch {
+    return 'Request failed';
+  }
+}
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
 
-  // Mock login function
-  const login = async (email: string, password: string) => {
-    // Simulate API call
-    await new Promise(resolve => setTimeout(resolve, 500));
+  useEffect(() => {
+    const token = localStorage.getItem(AUTH_TOKEN_KEY);
+    const rawUser = localStorage.getItem(AUTH_USER_KEY);
+    if (rawUser) {
+      try {
+        setUser(normalizeUser(JSON.parse(rawUser) as BackendUser));
+      } catch {
+        clearStoredAuth();
+      }
+    }
 
-    // Mock user data
-    setUser({
-      id: '1',
-      email,
-      name: email.split('@')[0],
-      subscription: 'basic',
-      workoutRoutines: [
-        {
-          id: '1',
-          name: 'Upper Body Strength',
-          exercises: ['Bicep Curl', 'Dumbbell Lat Raise'],
-          createdAt: new Date('2026-03-15')
-        },
-        {
-          id: '2',
-          name: 'Lower Body & Core',
-          exercises: ['Squats', 'Push-ups'],
-          createdAt: new Date('2026-03-18')
+    if (!token) {
+      return;
+    }
+
+    fetch(`${BACKEND_BASE_URL}/api/v1/auth/me`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(await parseError(response));
         }
-      ],
-      exerciseHistory: generateMockHistory()
+        return response.json() as Promise<BackendUser>;
+      })
+      .then((backendUser) => {
+        const normalizedUser = normalizeUser(backendUser);
+        setUser((existingUser) => ({
+          ...normalizedUser,
+          workoutRoutines: existingUser?.workoutRoutines ?? normalizedUser.workoutRoutines,
+          exerciseHistory: existingUser?.exerciseHistory ?? normalizedUser.exerciseHistory,
+        }));
+      })
+      .catch(() => {
+        clearStoredAuth();
+        setUser(null);
+      });
+  }, []);
+
+  const login = async (email: string, password: string) => {
+    const response = await fetch(`${BACKEND_BASE_URL}/api/v1/auth/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ email, password }),
     });
+
+    if (!response.ok) {
+      throw new Error(await parseError(response));
+    }
+
+    const payload = (await response.json()) as AuthResponse;
+    const normalizedUser = normalizeUser(payload.user);
+    setUser(normalizedUser);
+    storeAuth(payload.access_token, normalizedUser);
   };
 
   const signup = async (email: string, password: string, name: string) => {
-    // Simulate API call
-    await new Promise(resolve => setTimeout(resolve, 500));
-
-    setUser({
-      id: '1',
-      email,
-      name,
-      subscription: 'basic',
-      workoutRoutines: [],
-      exerciseHistory: []
+    const response = await fetch(`${BACKEND_BASE_URL}/api/v1/auth/signup`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ email, password, name }),
     });
+
+    if (!response.ok) {
+      throw new Error(await parseError(response));
+    }
+
+    const payload = (await response.json()) as AuthResponse;
+    const normalizedUser = normalizeUser(payload.user);
+    setUser(normalizedUser);
+    storeAuth(payload.access_token, normalizedUser);
   };
 
   const logout = () => {
+    clearStoredAuth();
     setUser(null);
   };
 
   const updateSubscription = (tier: 'basic' | 'premium') => {
-    if (user) {
-      setUser({ ...user, subscription: tier });
-    }
+    setUser((existingUser) => {
+      if (!existingUser) {
+        return existingUser;
+      }
+      const updatedUser = { ...existingUser, subscription: tier };
+      const token = localStorage.getItem(AUTH_TOKEN_KEY);
+      if (token) {
+        storeAuth(token, updatedUser);
+      }
+      return updatedUser;
+    });
   };
 
   const addWorkoutRoutine = (routine: Omit<WorkoutRoutine, 'id' | 'createdAt'>) => {
-    if (user) {
+    setUser((existingUser) => {
+      if (!existingUser) {
+        return existingUser;
+      }
       const newRoutine = {
         ...routine,
         id: Date.now().toString(),
-        createdAt: new Date()
+        createdAt: new Date(),
       };
-      setUser({
-        ...user,
-        workoutRoutines: [...user.workoutRoutines, newRoutine]
-      });
-    }
+      const updatedUser = {
+        ...existingUser,
+        workoutRoutines: [...existingUser.workoutRoutines, newRoutine],
+      };
+      const token = localStorage.getItem(AUTH_TOKEN_KEY);
+      if (token) {
+        storeAuth(token, updatedUser);
+      }
+      return updatedUser;
+    });
   };
 
   const addExerciseSession = (session: Omit<ExerciseSession, 'id'>) => {
-    if (user) {
+    setUser((existingUser) => {
+      if (!existingUser) {
+        return existingUser;
+      }
       const newSession = {
         ...session,
-        id: Date.now().toString()
+        id: Date.now().toString(),
       };
-      setUser({
-        ...user,
-        exerciseHistory: [...user.exerciseHistory, newSession]
-      });
-    }
+      const updatedUser = {
+        ...existingUser,
+        exerciseHistory: [...existingUser.exerciseHistory, newSession],
+      };
+      const token = localStorage.getItem(AUTH_TOKEN_KEY);
+      if (token) {
+        storeAuth(token, updatedUser);
+      }
+      return updatedUser;
+    });
   };
 
   return (
-    <AuthContext.Provider value={{ user, login, signup, logout, updateSubscription, addWorkoutRoutine, addExerciseSession }}>
+    <AuthContext.Provider
+      value={{ user, login, signup, logout, updateSubscription, addWorkoutRoutine, addExerciseSession }}
+    >
       {children}
     </AuthContext.Provider>
   );
@@ -133,26 +243,4 @@ export function useAuth() {
     throw new Error('useAuth must be used within an AuthProvider');
   }
   return context;
-}
-
-// Generate mock exercise history data
-function generateMockHistory(): ExerciseSession[] {
-  const exercises = ['Bicep Curl', 'Dumbbell Lat Raise', 'Push-ups', 'Squats'];
-  const sessions: ExerciseSession[] = [];
-
-  for (let i = 0; i < 30; i++) {
-    const date = new Date();
-    date.setDate(date.getDate() - i);
-
-    sessions.push({
-      id: `session-${i}`,
-      exercise: exercises[Math.floor(Math.random() * exercises.length)],
-      date,
-      reps: Math.floor(Math.random() * 5) + 8,
-      quality: Math.random() * 30 + 70,
-      drift: Math.random() * 20
-    });
-  }
-
-  return sessions.sort((a, b) => a.date.getTime() - b.date.getTime());
 }
