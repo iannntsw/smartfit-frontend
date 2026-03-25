@@ -27,12 +27,13 @@ interface ExerciseSession {
 
 interface AuthContextType {
   user: User | null;
+  isAuthLoading: boolean;
   login: (email: string, password: string) => Promise<void>;
   signup: (email: string, password: string, name: string) => Promise<void>;
   logout: () => void;
   updateSubscription: (tier: 'basic' | 'premium') => void;
   addWorkoutRoutine: (routine: Omit<WorkoutRoutine, 'id' | 'createdAt'>) => void;
-  addExerciseSession: (session: Omit<ExerciseSession, 'id'>) => void;
+  addExerciseSession: (session: Omit<ExerciseSession, 'id'>) => Promise<void>;
 }
 
 type BackendUser = {
@@ -50,6 +51,15 @@ type AuthResponse = {
   user: BackendUser;
 };
 
+type BackendExerciseSession = {
+  id: string;
+  exercise: string;
+  date: string | Date;
+  reps: number;
+  quality: number;
+  drift: number;
+};
+
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 const BACKEND_BASE_URL = import.meta.env.VITE_BACKEND_BASE_URL ?? 'http://127.0.0.1:8000';
 const AUTH_TOKEN_KEY = 'smartfit_auth_token';
@@ -63,6 +73,13 @@ function normalizeUser(user: BackendUser): User {
       ...session,
       date: new Date(session.date),
     })),
+  };
+}
+
+function normalizeExerciseSession(session: BackendExerciseSession): ExerciseSession {
+  return {
+    ...session,
+    date: new Date(session.date),
   };
 }
 
@@ -87,6 +104,7 @@ async function parseError(response: Response): Promise<string> {
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
+  const [isAuthLoading, setIsAuthLoading] = useState(true);
 
   useEffect(() => {
     const token = localStorage.getItem(AUTH_TOKEN_KEY);
@@ -100,6 +118,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     if (!token) {
+      setIsAuthLoading(false);
       return;
     }
 
@@ -119,12 +138,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setUser((existingUser) => ({
           ...normalizedUser,
           workoutRoutines: existingUser?.workoutRoutines ?? normalizedUser.workoutRoutines,
-          exerciseHistory: existingUser?.exerciseHistory ?? normalizedUser.exerciseHistory,
+          exerciseHistory: normalizedUser.exerciseHistory,
         }));
       })
       .catch(() => {
         clearStoredAuth();
         setUser(null);
+      })
+      .finally(() => {
+        setIsAuthLoading(false);
       });
   }, []);
 
@@ -145,6 +167,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const normalizedUser = normalizeUser(payload.user);
     setUser(normalizedUser);
     storeAuth(payload.access_token, normalizedUser);
+    setIsAuthLoading(false);
   };
 
   const signup = async (email: string, password: string, name: string) => {
@@ -164,11 +187,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const normalizedUser = normalizeUser(payload.user);
     setUser(normalizedUser);
     storeAuth(payload.access_token, normalizedUser);
+    setIsAuthLoading(false);
   };
 
   const logout = () => {
     clearStoredAuth();
     setUser(null);
+    setIsAuthLoading(false);
   };
 
   const updateSubscription = (tier: 'basic' | 'premium') => {
@@ -207,30 +232,48 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
   };
 
-  const addExerciseSession = (session: Omit<ExerciseSession, 'id'>) => {
+  const addExerciseSession = async (session: Omit<ExerciseSession, 'id'>) => {
+    const token = localStorage.getItem(AUTH_TOKEN_KEY);
+    if (!token) {
+      throw new Error('You must be logged in to save a session.');
+    }
+
+    const response = await fetch(`${BACKEND_BASE_URL}/api/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        exercise: session.exercise,
+        date: session.date.toISOString(),
+        reps: session.reps,
+        quality: session.quality,
+        drift: session.drift,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(await parseError(response));
+    }
+
+    const savedSession = normalizeExerciseSession((await response.json()) as BackendExerciseSession);
     setUser((existingUser) => {
       if (!existingUser) {
         return existingUser;
       }
-      const newSession = {
-        ...session,
-        id: Date.now().toString(),
-      };
       const updatedUser = {
         ...existingUser,
-        exerciseHistory: [...existingUser.exerciseHistory, newSession],
+        exerciseHistory: [...existingUser.exerciseHistory, savedSession],
       };
-      const token = localStorage.getItem(AUTH_TOKEN_KEY);
-      if (token) {
-        storeAuth(token, updatedUser);
-      }
+      storeAuth(token, updatedUser);
       return updatedUser;
     });
   };
 
   return (
     <AuthContext.Provider
-      value={{ user, login, signup, logout, updateSubscription, addWorkoutRoutine, addExerciseSession }}
+      value={{ user, isAuthLoading, login, signup, logout, updateSubscription, addWorkoutRoutine, addExerciseSession }}
     >
       {children}
     </AuthContext.Provider>

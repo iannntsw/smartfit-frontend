@@ -431,6 +431,17 @@ export function LiveTraining() {
       const sessionSummary = aggregateSessionPredictions(predictions);
       if (sessionSummary) {
         setCurrentQuality(Math.round(sessionSummary.confidence * 100));
+        await addExerciseSession({
+          exercise: selectedExercise,
+          date: new Date(),
+          reps: payload.rep_count ?? predictions.length,
+          quality: Math.round(sessionSummary.confidence * 100),
+          drift: Number(
+            selectedExercise === 'Squats'
+              ? (sessionSummary.features.mean_torso_angle ?? lastPrediction?.features?.mean_torso_angle ?? 0)
+              : (sessionSummary.features.mean_body_alignment_error ?? lastPrediction?.features?.mean_body_alignment_error ?? 0),
+          ),
+        });
         await requestCoaching(sessionSummary, sessionSummary.sensor_context);
       } else {
         setCurrentQuality(0);
@@ -557,24 +568,28 @@ export function LiveTraining() {
     openSocket();
   };
 
-  const handleStopTracking = () => {
+  const handleStopTracking = async () => {
     setIsTracking(false);
     isTrackingRef.current = false;
     closeSocket();
     if (repCount > 0) {
       const sessionSummary = aggregateSessionPredictions(predictionHistoryRef.current);
-      addExerciseSession({
-        exercise: selectedExercise,
-        date: new Date(),
-        reps: repCount,
-        quality: sessionSummary ? Math.round(sessionSummary.confidence * 100) : currentQuality,
-        drift: Number(
-          selectedExercise === 'Squats'
-            ? (sessionSummary?.features?.mean_torso_angle ?? latestPrediction?.features?.mean_torso_angle ?? 0)
-            : (sessionSummary?.features?.mean_body_alignment_error ?? latestPrediction?.features?.mean_body_alignment_error ?? 0),
-        ),
-      });
-      setSessionComplete(true);
+      try {
+        await addExerciseSession({
+          exercise: selectedExercise,
+          date: new Date(),
+          reps: repCount,
+          quality: sessionSummary ? Math.round(sessionSummary.confidence * 100) : currentQuality,
+          drift: Number(
+            selectedExercise === 'Squats'
+              ? (sessionSummary?.features?.mean_torso_angle ?? latestPrediction?.features?.mean_torso_angle ?? 0)
+              : (sessionSummary?.features?.mean_body_alignment_error ?? latestPrediction?.features?.mean_body_alignment_error ?? 0),
+          ),
+        });
+        setSessionComplete(true);
+      } catch (error) {
+        setBackendError(error instanceof Error ? error.message : 'Unable to save the session.');
+      }
       if (sessionSummary) {
         void requestCoaching(sessionSummary, sessionSummary.sensor_context);
       }
