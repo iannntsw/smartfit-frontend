@@ -12,18 +12,33 @@ export function Signup() {
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
   const { signup } = useAuth();
   const navigate = useNavigate();
 
+  const passwordValidationMessage =
+    password.length > 0 && password.length < 8
+      ? 'Password must be at least 8 characters long.'
+      : '';
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setErrorMessage('');
+
+    if (password.length < 8) {
+      setErrorMessage('Password must be at least 8 characters long.');
+      return;
+    }
+
     setIsLoading(true);
 
     try {
       await signup(email, password, name);
       navigate('/dashboard');
     } catch (error) {
-      console.error('Signup failed:', error);
+      const message =
+        error instanceof Error ? error.message : 'Unable to create account. Please try again.';
+      setErrorMessage(message);
     } finally {
       setIsLoading(false);
     }
@@ -73,10 +88,16 @@ export function Signup() {
                 onChange={(e) => setPassword(e.target.value)}
                 required
               />
+              {passwordValidationMessage ? (
+                <p className="text-xs text-red-600">{passwordValidationMessage}</p>
+              ) : null}
             </div>
             <Button type="submit" className="w-full" disabled={isLoading}>
               {isLoading ? 'Creating account...' : 'Sign Up'}
             </Button>
+            {errorMessage ? (
+              <p className="text-sm text-red-600">{errorMessage}</p>
+            ) : null}
           </form>
           <div className="mt-4 text-center text-sm">
             Already have an account?{' '}
