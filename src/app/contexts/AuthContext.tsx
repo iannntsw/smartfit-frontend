@@ -27,12 +27,13 @@ interface ExerciseSession {
 
 interface AuthContextType {
   user: User | null;
+  isAuthLoading: boolean;
   login: (email: string, password: string) => Promise<void>;
   signup: (email: string, password: string, name: string) => Promise<void>;
   logout: () => void;
   updateSubscription: (tier: 'basic' | 'premium') => void;
   addWorkoutRoutine: (routine: Omit<WorkoutRoutine, 'id' | 'createdAt'>) => void;
-  addExerciseSession: (session: Omit<ExerciseSession, 'id'>) => void;
+  addExerciseSession: (session: Omit<ExerciseSession, 'id'>) => Promise<void>;
 }
 
 type BackendUser = {
@@ -87,6 +88,7 @@ async function parseError(response: Response): Promise<string> {
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
+  const [isAuthLoading, setIsAuthLoading] = useState(true);
 
   useEffect(() => {
     const token = localStorage.getItem(AUTH_TOKEN_KEY);
@@ -100,6 +102,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     if (!token) {
+      setIsAuthLoading(false);
       return;
     }
 
@@ -125,6 +128,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       .catch(() => {
         clearStoredAuth();
         setUser(null);
+      })
+      .finally(() => {
+        setIsAuthLoading(false);
       });
   }, []);
 
@@ -207,30 +213,63 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
   };
 
-  const addExerciseSession = (session: Omit<ExerciseSession, 'id'>) => {
+  const addExerciseSession = async (session: Omit<ExerciseSession, 'id'>) => {
+    const token = localStorage.getItem(AUTH_TOKEN_KEY);
+    if (!token) {
+      throw new Error('You must be logged in to save a session.');
+    }
+
+    const response = await fetch(`${BACKEND_BASE_URL}/api/v1/sessions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        exercise: session.exercise,
+        date: session.date.toISOString(),
+        reps: session.reps,
+        quality: session.quality,
+        drift: session.drift,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(await parseError(response));
+    }
+
+    const payload = (await response.json()) as ExerciseSession;
     setUser((existingUser) => {
       if (!existingUser) {
         return existingUser;
       }
-      const newSession = {
-        ...session,
-        id: Date.now().toString(),
-      };
       const updatedUser = {
         ...existingUser,
-        exerciseHistory: [...existingUser.exerciseHistory, newSession],
+        exerciseHistory: [
+          ...existingUser.exerciseHistory,
+          {
+            ...payload,
+            date: new Date(payload.date),
+          },
+        ],
       };
-      const token = localStorage.getItem(AUTH_TOKEN_KEY);
-      if (token) {
-        storeAuth(token, updatedUser);
-      }
+      storeAuth(token, updatedUser);
       return updatedUser;
     });
   };
 
   return (
     <AuthContext.Provider
-      value={{ user, login, signup, logout, updateSubscription, addWorkoutRoutine, addExerciseSession }}
+      value={{
+        user,
+        isAuthLoading,
+        login,
+        signup,
+        logout,
+        updateSubscription,
+        addWorkoutRoutine,
+        addExerciseSession,
+      }}
     >
       {children}
     </AuthContext.Provider>

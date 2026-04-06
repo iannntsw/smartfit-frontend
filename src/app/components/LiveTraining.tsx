@@ -34,6 +34,7 @@ type LatestPrediction = {
 
 type LiveEvent = {
   event: string;
+  session_id?: string;
   frame_id?: number;
   rep_count: number;
   state: string;
@@ -42,6 +43,9 @@ type LiveEvent = {
   latest_prediction?: LatestPrediction;
   camera_angle?: string;
   landmarks?: Record<string, [number, number]>;
+  active_arm?: string;
+  sensor_status?: string;
+  sensor_sample_count?: number;
 };
 
 type CoachingResponse = {
@@ -71,6 +75,8 @@ const PUSHUP_WS_URL =
   import.meta.env.VITE_PUSHUP_WS_URL ?? 'ws://127.0.0.1:8000/ws/live/pushup';
 const SQUAT_WS_URL =
   import.meta.env.VITE_SQUAT_WS_URL ?? 'ws://127.0.0.1:8000/ws/live/squat';
+const CURL_WS_URL =
+  import.meta.env.VITE_CURL_WS_URL ?? 'ws://127.0.0.1:8000/ws/live/curl';
 
 const exercises = ['Push-ups', 'Squats', 'Bicep Curl', 'Dumbbell Lat Raise'];
 const POSE_CONNECTIONS: Array<[string, string]> = [
@@ -90,13 +96,31 @@ const POSE_CONNECTIONS: Array<[string, string]> = [
 
 function formatTrackerState(state: string) {
   switch (state) {
+    case 'waiting_bottom':
+      return 'Waiting for bottom position';
     case 'waiting_top':
       return 'Waiting for top position';
+    case 'ascending':
+      return 'Tracking current rep';
     case 'descending':
       return 'Tracking current rep';
     default:
       return state;
   }
+}
+
+function getExerciseSlug(exercise: string) {
+  if (exercise === 'Squats') {
+    return 'squat';
+  }
+  if (exercise === 'Bicep Curl') {
+    return 'curl';
+  }
+  return 'pushup';
+}
+
+function getInitialTrackerState(exercise: string) {
+  return exercise === 'Bicep Curl' ? 'waiting_bottom' : 'waiting_top';
 }
 
 function buildFeedbackMessages(
@@ -106,10 +130,8 @@ function buildFeedbackMessages(
   trackerState: string,
   subscription: 'basic' | 'premium' | undefined,
 ): string[] {
-  if (exercise !== 'Push-ups') {
-    if (exercise !== 'Squats') {
-      return ['Live backend tracking is currently enabled for push-ups and squats only.'];
-    }
+  if (exercise !== 'Push-ups' && exercise !== 'Squats' && exercise !== 'Bicep Curl') {
+    return ['Live backend tracking is currently enabled for push-ups, squats, and bicep curls only.'];
   }
 
   if (!prediction) {
@@ -159,12 +181,31 @@ function buildFeedbackMessages(
       default:
         messages.push(`Prediction: ${prediction.predicted_label}`);
     }
+  } else if (exercise === 'Bicep Curl') {
+    switch (prediction.predicted_label) {
+      case 'correct':
+        messages.push('Curl tempo and elbow control look stable.');
+        break;
+      case 'swinging':
+        messages.push('Reduce torso swing and keep the elbow pinned closer to your side.');
+        break;
+      case 'partial_rom':
+        messages.push('Lower further before starting the next curl to use full range.');
+        break;
+      case 'too_fast':
+        messages.push('Slow the curl down and control the lowering phase.');
+        break;
+      default:
+        messages.push(`Prediction: ${prediction.predicted_label}`);
+    }
   }
 
   if (subscription === 'premium') {
     messages.push(
       exercise === 'Squats'
         ? 'Premium coaching: aim for controlled top-bottom-top cycles with stable knee tracking.'
+        : exercise === 'Bicep Curl'
+          ? 'Premium coaching: keep the elbow quiet, use full range, and avoid using torso momentum.'
         : 'Premium coaching: aim for smooth top-bottom-top cycles with stable hip height.',
     );
   }
@@ -241,12 +282,15 @@ export function LiveTraining() {
   const [repCount, setRepCount] = useState(0);
   const [currentQuality, setCurrentQuality] = useState(0);
   const [feedbackMessages, setFeedbackMessages] = useState<string[]>([]);
-  const [trackerState, setTrackerState] = useState('waiting_top');
+  const [trackerState, setTrackerState] = useState(getInitialTrackerState(selectedExercise));
   const [latestPrediction, setLatestPrediction] = useState<LatestPrediction | null>(null);
   const [liveLandmarks, setLiveLandmarks] = useState<Record<string, [number, number]>>({});
   const [uploadedFrames, setUploadedFrames] = useState<VideoPredictionResponse['frames']>([]);
   const [uploadedLandmarks, setUploadedLandmarks] = useState<Record<string, [number, number]>>({});
   const [smoothedPrimaryAngle, setSmoothedPrimaryAngle] = useState<number | null>(null);
+  const [sensorSessionId, setSensorSessionId] = useState<string | null>(null);
+  const [sensorStatus, setSensorStatus] = useState<'waiting' | 'connected' | 'not_applicable'>('not_applicable');
+  const [sensorSampleCount, setSensorSampleCount] = useState(0);
   const [coachResponse, setCoachResponse] = useState<CoachingResponse | null>(null);
   const [coachLoading, setCoachLoading] = useState(false);
   const [coachError, setCoachError] = useState('');
@@ -318,7 +362,7 @@ export function LiveTraining() {
     prediction: LatestPrediction,
     sensorContext: Record<string, number | string> | null = null,
   ) => {
-    const exerciseSlug = selectedExercise === 'Squats' ? 'squat' : 'pushup';
+    const exerciseSlug = getExerciseSlug(selectedExercise);
     setCoachLoading(true);
     setCoachError('');
     try {
@@ -387,12 +431,12 @@ export function LiveTraining() {
       return;
     }
 
-    if (selectedExercise !== 'Push-ups' && selectedExercise !== 'Squats') {
-      setBackendError('Video analysis is currently enabled for push-ups and squats only.');
+    if (selectedExercise !== 'Push-ups' && selectedExercise !== 'Squats' && selectedExercise !== 'Bicep Curl') {
+      setBackendError('Video analysis is currently enabled for push-ups, squats, and bicep curls only.');
       return;
     }
 
-    const exerciseSlug = selectedExercise === 'Squats' ? 'squat' : 'pushup';
+    const exerciseSlug = getExerciseSlug(selectedExercise);
     const formData = new FormData();
     formData.append('file', uploadedFile);
 
@@ -431,6 +475,19 @@ export function LiveTraining() {
       const sessionSummary = aggregateSessionPredictions(predictions);
       if (sessionSummary) {
         setCurrentQuality(Math.round(sessionSummary.confidence * 100));
+        await addExerciseSession({
+          exercise: selectedExercise,
+          date: new Date(),
+          reps: payload.rep_count ?? predictions.length,
+          quality: Math.round(sessionSummary.confidence * 100),
+          drift: Number(
+            selectedExercise === 'Squats'
+              ? (sessionSummary.features.mean_torso_angle ?? lastPrediction?.features?.mean_torso_angle ?? 0)
+              : selectedExercise === 'Bicep Curl'
+                ? (sessionSummary.features.mean_shoulder_drift ?? lastPrediction?.features?.mean_shoulder_drift ?? 0)
+              : (sessionSummary.features.mean_body_alignment_error ?? lastPrediction?.features?.mean_body_alignment_error ?? 0),
+          ),
+        });
         await requestCoaching(sessionSummary, sessionSummary.sensor_context);
       } else {
         setCurrentQuality(0);
@@ -450,6 +507,13 @@ export function LiveTraining() {
     setRepCount(payload.rep_count);
     setTrackerState(payload.state);
     setLiveLandmarks(payload.landmarks ?? {});
+    if (payload.session_id) {
+      setSensorSessionId(payload.session_id);
+    }
+    if (selectedExercise === 'Bicep Curl') {
+      setSensorStatus((payload.sensor_status as 'waiting' | 'connected' | undefined) ?? 'waiting');
+      setSensorSampleCount(payload.sensor_sample_count ?? 0);
+    }
     setSmoothedPrimaryAngle(
       selectedExercise === 'Squats'
         ? (payload.smoothed_knee_angle ?? null)
@@ -498,7 +562,11 @@ export function LiveTraining() {
     setConnectionStatus('connecting');
 
     const websocket = new WebSocket(
-      selectedExercise === 'Squats' ? SQUAT_WS_URL : PUSHUP_WS_URL,
+      selectedExercise === 'Squats'
+        ? SQUAT_WS_URL
+        : selectedExercise === 'Bicep Curl'
+          ? CURL_WS_URL
+          : PUSHUP_WS_URL,
     );
     socketRef.current = websocket;
 
@@ -529,8 +597,8 @@ export function LiveTraining() {
   };
 
   const handleStartTracking = () => {
-    if (selectedExercise !== 'Push-ups' && selectedExercise !== 'Squats') {
-      setBackendError('Video analysis is currently enabled for push-ups and squats only.');
+    if (selectedExercise !== 'Push-ups' && selectedExercise !== 'Squats' && selectedExercise !== 'Bicep Curl') {
+      setBackendError('Video analysis is currently enabled for push-ups, squats, and bicep curls only.');
       return;
     }
 
@@ -545,7 +613,10 @@ export function LiveTraining() {
     setCoachResponse(null);
     setCoachError('');
     setCoachLoading(false);
-    setTrackerState('waiting_top');
+    setTrackerState(getInitialTrackerState(selectedExercise));
+    setSensorSessionId(null);
+    setSensorStatus(selectedExercise === 'Bicep Curl' ? 'waiting' : 'not_applicable');
+    setSensorSampleCount(0);
     setSessionComplete(false);
     if (!useWebcam) {
       void runUploadedVideoAnalysis();
@@ -557,24 +628,30 @@ export function LiveTraining() {
     openSocket();
   };
 
-  const handleStopTracking = () => {
+  const handleStopTracking = async () => {
     setIsTracking(false);
     isTrackingRef.current = false;
     closeSocket();
     if (repCount > 0) {
       const sessionSummary = aggregateSessionPredictions(predictionHistoryRef.current);
-      addExerciseSession({
-        exercise: selectedExercise,
-        date: new Date(),
-        reps: repCount,
-        quality: sessionSummary ? Math.round(sessionSummary.confidence * 100) : currentQuality,
-        drift: Number(
-          selectedExercise === 'Squats'
-            ? (sessionSummary?.features?.mean_torso_angle ?? latestPrediction?.features?.mean_torso_angle ?? 0)
-            : (sessionSummary?.features?.mean_body_alignment_error ?? latestPrediction?.features?.mean_body_alignment_error ?? 0),
-        ),
-      });
-      setSessionComplete(true);
+      try {
+        await addExerciseSession({
+          exercise: selectedExercise,
+          date: new Date(),
+          reps: repCount,
+          quality: sessionSummary ? Math.round(sessionSummary.confidence * 100) : currentQuality,
+          drift: Number(
+            selectedExercise === 'Squats'
+              ? (sessionSummary?.features?.mean_torso_angle ?? latestPrediction?.features?.mean_torso_angle ?? 0)
+              : selectedExercise === 'Bicep Curl'
+                ? (sessionSummary?.features?.mean_shoulder_drift ?? latestPrediction?.features?.mean_shoulder_drift ?? 0)
+              : (sessionSummary?.features?.mean_body_alignment_error ?? latestPrediction?.features?.mean_body_alignment_error ?? 0),
+          ),
+        });
+        setSessionComplete(true);
+      } catch (error) {
+        setBackendError(error instanceof Error ? error.message : 'Unable to save the session.');
+      }
       if (sessionSummary) {
         void requestCoaching(sessionSummary, sessionSummary.sensor_context);
       }
@@ -595,7 +672,10 @@ export function LiveTraining() {
     setCoachResponse(null);
     setCoachError('');
     setCoachLoading(false);
-    setTrackerState('waiting_top');
+    setTrackerState(getInitialTrackerState(selectedExercise));
+    setSensorSessionId(null);
+    setSensorStatus('not_applicable');
+    setSensorSampleCount(0);
     setBackendError('');
     setSessionComplete(false);
     setUploadedFile(null);
@@ -635,10 +715,14 @@ export function LiveTraining() {
   const cameraCardDescription =
     selectedExercise === 'Squats'
       ? 'Side-view squat tracking through the FastAPI backend'
-      : 'Side-view push-up tracking through the FastAPI backend';
+      : selectedExercise === 'Bicep Curl'
+        ? 'Side-view bicep-curl tracking through the FastAPI backend'
+        : 'Side-view push-up tracking through the FastAPI backend';
   const latestPredictionEmptyText =
     selectedExercise === 'Squats'
       ? 'No completed squat prediction yet.'
+      : selectedExercise === 'Bicep Curl'
+        ? 'No completed curl prediction yet.'
       : 'No completed rep prediction yet.';
 
   return (
@@ -716,7 +800,6 @@ export function LiveTraining() {
                         className="pointer-events-none absolute inset-0 h-full w-full"
                         viewBox="0 0 100 100"
                         preserveAspectRatio="none"
-                        style={{ transform: 'scaleX(-1)' }}
                       >
                         {POSE_CONNECTIONS.map(([startKey, endKey]) => {
                           const startPoint = liveLandmarks[startKey];
@@ -926,10 +1009,50 @@ export function LiveTraining() {
                 </SelectContent>
               </Select>
               <p className="mt-3 text-xs text-gray-500">
-                Live tracking and uploaded-video analysis are currently implemented for push-ups and squats.
+                Live tracking and uploaded-video analysis are currently implemented for push-ups, squats, and bicep curls.
               </p>
+              {selectedExercise === 'Bicep Curl' ? (
+                <div className="mt-3 rounded-md bg-amber-50 p-3 text-xs text-amber-900">
+                  Start a curl webcam session first, then point your micro:bit logger at the live session ID shown below so the backend can fuse accelerometer data with the curl tracker.
+                </div>
+              ) : null}
             </CardContent>
           </Card>
+
+          {selectedExercise === 'Bicep Curl' ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>Micro:bit Sensor</CardTitle>
+                <CardDescription>Live accelerometer fusion for curl sessions</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3 text-sm">
+                <div className="flex items-center justify-between">
+                  <span className="text-gray-500">Sensor status</span>
+                  <Badge variant={sensorStatus === 'connected' ? 'default' : 'secondary'}>
+                    {sensorStatus === 'connected' ? 'Connected' : 'Waiting'}
+                  </Badge>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-gray-500">Samples received</span>
+                  <span>{sensorSampleCount}</span>
+                </div>
+                <div>
+                  <div className="mb-1 text-gray-500">Live session ID</div>
+                  <div className="break-all rounded-md bg-gray-100 p-2 font-mono text-xs">
+                    {sensorSessionId ?? 'Start curl tracking to generate a session ID'}
+                  </div>
+                </div>
+                {sensorSessionId ? (
+                  <div>
+                    <div className="mb-1 text-gray-500">Logger command</div>
+                    <div className="break-all rounded-md bg-gray-100 p-2 font-mono text-xs">
+                      python logger.py --address &lt;MICROBIT_ADDRESS&gt; --prefix ian_curl_live --out data/curl --backend-ws ws://127.0.0.1:8000/ws/live/curl/sensor --session-id {sensorSessionId}
+                    </div>
+                  </div>
+                ) : null}
+              </CardContent>
+            </Card>
+          ) : null}
 
           <Card>
             <CardHeader>
@@ -1048,6 +1171,8 @@ export function LiveTraining() {
                     <div className="rounded-md bg-gray-100 p-2">
                       {selectedExercise === 'Squats'
                         ? `Torso angle: ${Number(latestPrediction.features.mean_torso_angle ?? 0).toFixed(1)}`
+                        : selectedExercise === 'Bicep Curl'
+                          ? `Shoulder drift: ${Number(latestPrediction.features.mean_shoulder_drift ?? 0).toFixed(2)}`
                         : `Alignment err: ${Number(latestPrediction.features.mean_body_alignment_error ?? 0).toFixed(1)}`}
                     </div>
                   </div>
@@ -1060,7 +1185,13 @@ export function LiveTraining() {
 
           <Card>
             <CardHeader>
-              <CardTitle>{selectedExercise === 'Squats' ? 'Squat Guide' : 'Push-up Guide'}</CardTitle>
+              <CardTitle>
+                {selectedExercise === 'Squats'
+                  ? 'Squat Guide'
+                  : selectedExercise === 'Bicep Curl'
+                    ? 'Bicep Curl Guide'
+                    : 'Push-up Guide'}
+              </CardTitle>
             </CardHeader>
             <CardContent>
               <div className="space-y-2 text-sm">
@@ -1070,6 +1201,13 @@ export function LiveTraining() {
                     <p>2. Start in a full standing position before the first rep.</p>
                     <p>3. Sit down and stand up with controlled tempo on each rep.</p>
                     <p>4. Keep your knees tracking over your feet and avoid excessive forward lean.</p>
+                  </>
+                ) : selectedExercise === 'Bicep Curl' ? (
+                  <>
+                    <p>1. Place the camera at your side so your shoulder, elbow, and wrist stay visible.</p>
+                    <p>2. Start with the arm lowered before the first curl.</p>
+                    <p>3. Keep the upper arm quiet and avoid using torso momentum.</p>
+                    <p>4. Lower the weight fully and control the descent before the next rep.</p>
                   </>
                 ) : (
                   <>
