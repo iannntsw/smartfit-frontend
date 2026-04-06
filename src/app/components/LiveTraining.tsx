@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 
 import { useAuth } from '../contexts/AuthContext';
+import { clearWorkoutSetResult, getWorkoutSetResult, markCompletedWorkoutSet, saveWorkoutSetResult } from '../lib/startWorkoutSession';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
@@ -75,6 +76,14 @@ type PendingSession = {
   reps: number;
   quality: number;
   drift: number;
+};
+
+type LiveTrainingLocationState = {
+  exercise?: string;
+  routineName?: string;
+  setNumber?: number;
+  totalSets?: number;
+  returnToWorkout?: boolean;
 };
 
 const BACKEND_BASE_URL =
@@ -269,6 +278,7 @@ function aggregateSessionPredictions(predictions: LatestPrediction[]) {
 export function LiveTraining() {
   const navigate = useNavigate();
   const location = useLocation();
+  const locationState = (location.state ?? {}) as LiveTrainingLocationState;
   const { user, addExerciseSession } = useAuth();
 
   const webcamRef = useRef<Webcam>(null);
@@ -280,7 +290,7 @@ export function LiveTraining() {
   const isTrackingRef = useRef(false);
   const predictionHistoryRef = useRef<LatestPrediction[]>([]);
 
-  const [selectedExercise, setSelectedExercise] = useState(location.state?.exercise || 'Push-ups');
+  const [selectedExercise, setSelectedExercise] = useState(locationState.exercise || 'Push-ups');
   const [useWebcam, setUseWebcam] = useState(true);
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [uploadedVideoUrl, setUploadedVideoUrl] = useState<string | null>(null);
@@ -309,6 +319,7 @@ export function LiveTraining() {
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
   const [backendError, setBackendError] = useState<string>('');
   const [uploadProcessing, setUploadProcessing] = useState(false);
+  const [workoutSetRecorded, setWorkoutSetRecorded] = useState(false);
 
   const stopFrameLoop = () => {
     if (frameIntervalRef.current !== null) {
@@ -369,6 +380,113 @@ export function LiveTraining() {
       ),
     );
   }, [latestPrediction, selectedExercise, trackerState, user?.subscription]);
+
+  useEffect(() => {
+    if (!locationState.returnToWorkout || !sessionComplete || !locationState.exercise || !locationState.setNumber) {
+      return;
+    }
+
+    markCompletedWorkoutSet(locationState.exercise, locationState.setNumber);
+    setWorkoutSetRecorded(true);
+  }, [locationState.exercise, locationState.returnToWorkout, locationState.setNumber, sessionComplete]);
+
+  useEffect(() => {
+    if (!locationState.returnToWorkout || !locationState.exercise || !locationState.setNumber || !coachResponse) {
+      return;
+    }
+
+    saveWorkoutSetResult(
+      locationState.exercise,
+      locationState.setNumber,
+      {
+        exercise: locationState.exercise,
+        setNumber: locationState.setNumber,
+        source: useWebcam ? 'webcam' : 'upload',
+        repCount,
+        currentQuality,
+        coachResponse,
+      },
+      !useWebcam ? uploadedFile ?? undefined : undefined,
+    );
+  }, [
+    coachResponse,
+    currentQuality,
+    locationState.exercise,
+    locationState.returnToWorkout,
+    locationState.setNumber,
+    repCount,
+    uploadedFile,
+    useWebcam,
+  ]);
+
+  useEffect(() => {
+    if (!locationState.returnToWorkout || !locationState.exercise || !locationState.setNumber) {
+      return;
+    }
+
+    let cancelled = false;
+
+    void (async () => {
+      const storedSet = await getWorkoutSetResult(locationState.exercise!, locationState.setNumber!);
+      if (cancelled || !storedSet?.result) {
+        return;
+      }
+
+      setRepCount(storedSet.result.repCount);
+      setCurrentQuality(storedSet.result.currentQuality);
+      setSessionComplete(true);
+      setWorkoutSetRecorded(true);
+      setSessionSaved(Boolean(storedSet.result.sessionSummarySaved));
+      setTrackerState(storedSet.result.source === 'upload' ? 'upload_complete' : getInitialTrackerState(selectedExercise));
+      setCoachResponse(storedSet.result.coachResponse ?? null);
+      setCoachError('');
+      setCoachLoading(false);
+      setPendingSession(
+        storedSet.result.pendingSession
+          ? {
+              ...storedSet.result.pendingSession,
+              date: new Date(storedSet.result.pendingSession.date),
+            }
+          : null,
+      );
+
+      if (storedSet.result.source === 'upload' && storedSet.file) {
+        setUseWebcam(false);
+        setUploadedFile(storedSet.file);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [locationState.exercise, locationState.returnToWorkout, locationState.setNumber, selectedExercise]);
+
+  const handleBackNavigation = () => {
+    if (locationState.returnToWorkout && sessionComplete && locationState.exercise && locationState.setNumber) {
+      markCompletedWorkoutSet(locationState.exercise, locationState.setNumber);
+      saveWorkoutSetResult(
+        locationState.exercise,
+        locationState.setNumber,
+        {
+          exercise: locationState.exercise,
+          setNumber: locationState.setNumber,
+          source: useWebcam ? 'webcam' : 'upload',
+          repCount,
+          currentQuality,
+          pendingSession: pendingSession
+            ? {
+                ...pendingSession,
+                date: pendingSession.date.toISOString(),
+              }
+            : null,
+          sessionSummarySaved: sessionSaved,
+          coachResponse,
+        },
+        !useWebcam ? uploadedFile ?? undefined : undefined,
+      );
+    }
+    navigate(locationState.returnToWorkout ? '/start-workout' : '/dashboard');
+  };
 
   const requestCoaching = async (
     prediction: LatestPrediction,
@@ -434,6 +552,26 @@ export function LiveTraining() {
     try {
       await addExerciseSession(pendingSession);
       setSessionSaved(true);
+      if (locationState.returnToWorkout && locationState.exercise && locationState.setNumber) {
+        saveWorkoutSetResult(
+          locationState.exercise,
+          locationState.setNumber,
+          {
+            exercise: locationState.exercise,
+            setNumber: locationState.setNumber,
+            source: useWebcam ? 'webcam' : 'upload',
+            repCount,
+            currentQuality,
+            pendingSession: {
+              ...pendingSession,
+              date: pendingSession.date.toISOString(),
+            },
+            sessionSummarySaved: true,
+            coachResponse,
+          },
+          !useWebcam ? uploadedFile ?? undefined : undefined,
+        );
+      }
     } catch (error) {
       setSaveSessionError(error instanceof Error ? error.message : 'Unable to save the session.');
     } finally {
@@ -493,6 +631,7 @@ export function LiveTraining() {
     setCoachResponse(null);
     setPendingSession(null);
     setSessionSaved(false);
+    setWorkoutSetRecorded(false);
     setSaveSessionLoading(false);
     setSaveSessionError('');
     setSessionComplete(false);
@@ -535,6 +674,23 @@ export function LiveTraining() {
 
       setTrackerState('upload_complete');
       setSessionComplete(true);
+      if (locationState.returnToWorkout && locationState.exercise && locationState.setNumber && uploadedFile) {
+        saveWorkoutSetResult(locationState.exercise, locationState.setNumber, {
+          exercise: locationState.exercise,
+          setNumber: locationState.setNumber,
+          source: 'upload',
+          repCount: payload.rep_count ?? predictions.length,
+          currentQuality: sessionSummary ? Math.round(sessionSummary.confidence * 100) : 0,
+          pendingSession: sessionSummary
+            ? {
+                ...buildPendingSession(payload.rep_count ?? predictions.length, sessionSummary, lastPrediction),
+                date: buildPendingSession(payload.rep_count ?? predictions.length, sessionSummary, lastPrediction).date.toISOString(),
+              }
+            : null,
+          sessionSummarySaved: false,
+          coachResponse: null,
+        }, uploadedFile);
+      }
     } catch (error) {
       setBackendError(error instanceof Error ? error.message : 'Unable to analyze uploaded video.');
     } finally {
@@ -655,6 +811,7 @@ export function LiveTraining() {
     setCoachLoading(false);
     setPendingSession(null);
     setSessionSaved(false);
+    setWorkoutSetRecorded(false);
     setSaveSessionLoading(false);
     setSaveSessionError('');
     setTrackerState(getInitialTrackerState(selectedExercise));
@@ -676,10 +833,26 @@ export function LiveTraining() {
     setIsTracking(false);
     isTrackingRef.current = false;
     closeSocket();
-    if (repCount > 0) {
-      const sessionSummary = aggregateSessionPredictions(predictionHistoryRef.current);
-      setPendingSession(buildPendingSession(repCount, sessionSummary, latestPrediction));
-      setSessionComplete(true);
+      if (repCount > 0) {
+        const sessionSummary = aggregateSessionPredictions(predictionHistoryRef.current);
+        const nextPendingSession = buildPendingSession(repCount, sessionSummary, latestPrediction);
+        setPendingSession(nextPendingSession);
+        setSessionComplete(true);
+        if (locationState.returnToWorkout && locationState.exercise && locationState.setNumber) {
+          saveWorkoutSetResult(locationState.exercise, locationState.setNumber, {
+            exercise: locationState.exercise,
+            setNumber: locationState.setNumber,
+            source: 'webcam',
+            repCount,
+            currentQuality: sessionSummary ? Math.round(sessionSummary.confidence * 100) : currentQuality,
+            pendingSession: {
+              ...nextPendingSession,
+              date: nextPendingSession.date.toISOString(),
+            },
+            sessionSummarySaved: false,
+            coachResponse: null,
+          });
+        }
       if (sessionSummary) {
         void requestCoaching(sessionSummary, sessionSummary.sensor_context);
       }
@@ -687,6 +860,9 @@ export function LiveTraining() {
   };
 
   const handleReset = () => {
+    if (locationState.returnToWorkout && locationState.exercise && locationState.setNumber) {
+      clearWorkoutSetResult(locationState.exercise, locationState.setNumber);
+    }
     setIsTracking(false);
     isTrackingRef.current = false;
     closeSocket();
@@ -702,6 +878,7 @@ export function LiveTraining() {
     setCoachLoading(false);
     setPendingSession(null);
     setSessionSaved(false);
+    setWorkoutSetRecorded(false);
     setSaveSessionLoading(false);
     setSaveSessionError('');
     setTrackerState(getInitialTrackerState(selectedExercise));
@@ -756,19 +933,42 @@ export function LiveTraining() {
       : selectedExercise === 'Bicep Curl'
         ? 'No completed curl prediction yet.'
       : 'No completed rep prediction yet.';
+  const routineContextLabel =
+    locationState.routineName && locationState.setNumber && locationState.totalSets
+      ? `${locationState.routineName} • ${selectedExercise} • Set ${locationState.setNumber} of ${locationState.totalSets}`
+      : locationState.routineName
+        ? `${locationState.routineName} • ${selectedExercise}`
+        : null;
 
   return (
     <div className="min-h-screen bg-gray-50">
       <header className="sticky top-0 z-10 border-b bg-white">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-4 sm:px-6 lg:px-8">
           <div className="flex items-center gap-4">
-            <Button variant="ghost" size="sm" onClick={() => navigate('/dashboard')}>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleBackNavigation}
+            >
               <ArrowLeft className="mr-2 h-4 w-4" />
-              Back
+              {locationState.returnToWorkout ? 'Back To Workout' : 'Back'}
             </Button>
-            <h1 className="text-xl">Live Training</h1>
+            <div>
+              <h1 className="text-xl">Live Training</h1>
+              {routineContextLabel ? <p className="text-sm text-gray-500">{routineContextLabel}</p> : null}
+            </div>
           </div>
           <div className="flex items-center gap-3">
+            {locationState.returnToWorkout ? (
+              <Button
+                variant="outline"
+                size="sm"
+                className="border-orange-200 bg-orange-50 text-orange-700 shadow-[0_0_18px_rgba(251,146,60,0.35)] hover:bg-orange-100"
+                onClick={handleBackNavigation}
+              >
+                Session In Progress
+              </Button>
+            ) : null}
             {connectionBadge}
             <Badge variant={user?.subscription === 'premium' ? 'default' : 'secondary'}>
               {user?.subscription === 'premium' ? 'AI Coaching Active' : 'Basic Mode'}
@@ -1013,10 +1213,16 @@ export function LiveTraining() {
                     <CheckCircle2 className={`h-6 w-6 ${sessionSaved ? 'text-green-600' : 'text-amber-600'}`} />
                     <div>
                       <h3 className={`font-medium ${sessionSaved ? 'text-green-900' : 'text-amber-900'}`}>
-                        {sessionSaved ? 'Session Added To Profile' : 'Session Ready To Add'}
+                        {sessionSaved
+                          ? 'Session Added To Profile'
+                          : workoutSetRecorded
+                            ? 'Set Recorded In Current Workout'
+                            : 'Session Ready To Add'}
                       </h3>
                       <p className={`text-sm ${sessionSaved ? 'text-green-700' : 'text-amber-700'}`}>
-                        {repCount} reps recorded with {currentQuality}% latest confidence.
+                        {workoutSetRecorded
+                          ? 'This set is already counted in the current workout. Use session summary only if you also want it saved to profile history.'
+                          : `${repCount} reps recorded with ${currentQuality}% latest confidence.`}
                       </p>
                     </div>
                   </div>
