@@ -69,6 +69,14 @@ type VideoPredictionResponse = {
   }>;
 };
 
+type PendingSession = {
+  exercise: string;
+  date: Date;
+  reps: number;
+  quality: number;
+  drift: number;
+};
+
 const BACKEND_BASE_URL =
   import.meta.env.VITE_BACKEND_BASE_URL ?? 'http://127.0.0.1:8000';
 const PUSHUP_WS_URL =
@@ -294,6 +302,10 @@ export function LiveTraining() {
   const [coachResponse, setCoachResponse] = useState<CoachingResponse | null>(null);
   const [coachLoading, setCoachLoading] = useState(false);
   const [coachError, setCoachError] = useState('');
+  const [pendingSession, setPendingSession] = useState<PendingSession | null>(null);
+  const [sessionSaved, setSessionSaved] = useState(false);
+  const [saveSessionLoading, setSaveSessionLoading] = useState(false);
+  const [saveSessionError, setSaveSessionError] = useState('');
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
   const [backendError, setBackendError] = useState<string>('');
   const [uploadProcessing, setUploadProcessing] = useState(false);
@@ -394,6 +406,41 @@ export function LiveTraining() {
     }
   };
 
+  const buildPendingSession = (
+    reps: number,
+    sessionSummary: ReturnType<typeof aggregateSessionPredictions>,
+    lastPrediction: LatestPrediction | null,
+  ): PendingSession => ({
+    exercise: selectedExercise,
+    date: new Date(),
+    reps,
+    quality: sessionSummary ? Math.round(sessionSummary.confidence * 100) : currentQuality,
+    drift: Number(
+      selectedExercise === 'Squats'
+        ? (sessionSummary?.features?.mean_torso_angle ?? lastPrediction?.features?.mean_torso_angle ?? 0)
+        : selectedExercise === 'Bicep Curl'
+          ? (sessionSummary?.features?.mean_shoulder_drift ?? lastPrediction?.features?.mean_shoulder_drift ?? 0)
+          : (sessionSummary?.features?.mean_body_alignment_error ?? lastPrediction?.features?.mean_body_alignment_error ?? 0),
+    ),
+  });
+
+  const handleSaveSession = async () => {
+    if (!pendingSession || sessionSaved) {
+      return;
+    }
+
+    setSaveSessionLoading(true);
+    setSaveSessionError('');
+    try {
+      await addExerciseSession(pendingSession);
+      setSessionSaved(true);
+    } catch (error) {
+      setSaveSessionError(error instanceof Error ? error.message : 'Unable to save the session.');
+    } finally {
+      setSaveSessionLoading(false);
+    }
+  };
+
   const syncUploadedOverlay = () => {
     const video = uploadedVideoRef.current;
     if (!video || uploadedFrames.length === 0) {
@@ -444,6 +491,10 @@ export function LiveTraining() {
     setBackendError('');
     setCoachError('');
     setCoachResponse(null);
+    setPendingSession(null);
+    setSessionSaved(false);
+    setSaveSessionLoading(false);
+    setSaveSessionError('');
     setSessionComplete(false);
     setRepCount(0);
     setLatestPrediction(null);
@@ -475,22 +526,11 @@ export function LiveTraining() {
       const sessionSummary = aggregateSessionPredictions(predictions);
       if (sessionSummary) {
         setCurrentQuality(Math.round(sessionSummary.confidence * 100));
-        await addExerciseSession({
-          exercise: selectedExercise,
-          date: new Date(),
-          reps: payload.rep_count ?? predictions.length,
-          quality: Math.round(sessionSummary.confidence * 100),
-          drift: Number(
-            selectedExercise === 'Squats'
-              ? (sessionSummary.features.mean_torso_angle ?? lastPrediction?.features?.mean_torso_angle ?? 0)
-              : selectedExercise === 'Bicep Curl'
-                ? (sessionSummary.features.mean_shoulder_drift ?? lastPrediction?.features?.mean_shoulder_drift ?? 0)
-              : (sessionSummary.features.mean_body_alignment_error ?? lastPrediction?.features?.mean_body_alignment_error ?? 0),
-          ),
-        });
+        setPendingSession(buildPendingSession(payload.rep_count ?? predictions.length, sessionSummary, lastPrediction));
         await requestCoaching(sessionSummary, sessionSummary.sensor_context);
       } else {
         setCurrentQuality(0);
+        setPendingSession(null);
       }
 
       setTrackerState('upload_complete');
@@ -613,6 +653,10 @@ export function LiveTraining() {
     setCoachResponse(null);
     setCoachError('');
     setCoachLoading(false);
+    setPendingSession(null);
+    setSessionSaved(false);
+    setSaveSessionLoading(false);
+    setSaveSessionError('');
     setTrackerState(getInitialTrackerState(selectedExercise));
     setSensorSessionId(null);
     setSensorStatus(selectedExercise === 'Bicep Curl' ? 'waiting' : 'not_applicable');
@@ -634,24 +678,8 @@ export function LiveTraining() {
     closeSocket();
     if (repCount > 0) {
       const sessionSummary = aggregateSessionPredictions(predictionHistoryRef.current);
-      try {
-        await addExerciseSession({
-          exercise: selectedExercise,
-          date: new Date(),
-          reps: repCount,
-          quality: sessionSummary ? Math.round(sessionSummary.confidence * 100) : currentQuality,
-          drift: Number(
-            selectedExercise === 'Squats'
-              ? (sessionSummary?.features?.mean_torso_angle ?? latestPrediction?.features?.mean_torso_angle ?? 0)
-              : selectedExercise === 'Bicep Curl'
-                ? (sessionSummary?.features?.mean_shoulder_drift ?? latestPrediction?.features?.mean_shoulder_drift ?? 0)
-              : (sessionSummary?.features?.mean_body_alignment_error ?? latestPrediction?.features?.mean_body_alignment_error ?? 0),
-          ),
-        });
-        setSessionComplete(true);
-      } catch (error) {
-        setBackendError(error instanceof Error ? error.message : 'Unable to save the session.');
-      }
+      setPendingSession(buildPendingSession(repCount, sessionSummary, latestPrediction));
+      setSessionComplete(true);
       if (sessionSummary) {
         void requestCoaching(sessionSummary, sessionSummary.sensor_context);
       }
@@ -672,6 +700,10 @@ export function LiveTraining() {
     setCoachResponse(null);
     setCoachError('');
     setCoachLoading(false);
+    setPendingSession(null);
+    setSessionSaved(false);
+    setSaveSessionLoading(false);
+    setSaveSessionError('');
     setTrackerState(getInitialTrackerState(selectedExercise));
     setSensorSessionId(null);
     setSensorStatus('not_applicable');
@@ -974,17 +1006,34 @@ export function LiveTraining() {
           </Card>
 
           {sessionComplete ? (
-            <Card className="border-green-200 bg-green-50">
+            <Card className={sessionSaved ? 'border-green-200 bg-green-50' : 'border-amber-200 bg-amber-50'}>
               <CardContent className="pt-6">
-                <div className="flex items-center gap-3">
-                  <CheckCircle2 className="h-6 w-6 text-green-600" />
+                <div className="flex items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <CheckCircle2 className={`h-6 w-6 ${sessionSaved ? 'text-green-600' : 'text-amber-600'}`} />
+                    <div>
+                      <h3 className={`font-medium ${sessionSaved ? 'text-green-900' : 'text-amber-900'}`}>
+                        {sessionSaved ? 'Session Added To Profile' : 'Session Ready To Add'}
+                      </h3>
+                      <p className={`text-sm ${sessionSaved ? 'text-green-700' : 'text-amber-700'}`}>
+                        {repCount} reps recorded with {currentQuality}% latest confidence.
+                      </p>
+                    </div>
+                  </div>
                   <div>
-                    <h3 className="font-medium text-green-900">Session Saved</h3>
-                    <p className="text-sm text-green-700">
-                      {repCount} reps recorded with {currentQuality}% latest confidence.
-                    </p>
+                    <Button
+                      onClick={() => void handleSaveSession()}
+                      disabled={!pendingSession || sessionSaved || saveSessionLoading}
+                    >
+                      {sessionSaved ? 'Added' : saveSessionLoading ? 'Adding...' : 'Add To Session Summary'}
+                    </Button>
                   </div>
                 </div>
+                {saveSessionError ? (
+                  <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                    {saveSessionError}
+                  </div>
+                ) : null}
               </CardContent>
             </Card>
           ) : null}
