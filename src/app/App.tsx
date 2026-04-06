@@ -14,7 +14,7 @@ import { Toaster } from './components/ui/sonner';
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, isAuthLoading } = useAuth();
   if (isAuthLoading) {
-    return <div className="min-h-screen bg-gray-50" />;
+    return null;
   }
   return user ? <>{children}</> : <Navigate to="/login" />;
 }
