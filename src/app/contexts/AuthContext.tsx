@@ -6,14 +6,40 @@ interface User {
   name: string;
   subscription: 'basic' | 'premium';
   workoutRoutines: WorkoutRoutine[];
+  workoutHistory: WorkoutHistoryEntry[];
   exerciseHistory: ExerciseSession[];
 }
 
 interface WorkoutRoutine {
   id: string;
   name: string;
-  exercises: string[];
+  exercises: WorkoutRoutineExercise[];
   createdAt: Date;
+}
+
+interface WorkoutRoutineExercise {
+  name: string;
+  sets: number;
+}
+
+interface WorkoutSetCoachResponse {
+  exercise: string;
+  predicted_label: string;
+  provider: string;
+  model: string;
+  summary: string;
+  priority: string;
+  cues: string[];
+  safety_note?: string | null;
+}
+
+interface WorkoutHistorySetResult {
+  exercise: string;
+  setNumber: number;
+  repCount: number;
+  currentQuality: number;
+  source: 'upload' | 'webcam';
+  coachResponse?: WorkoutSetCoachResponse | null;
 }
 
 interface ExerciseSession {
@@ -25,6 +51,14 @@ interface ExerciseSession {
   drift: number;
 }
 
+interface WorkoutHistoryEntry {
+  id: string;
+  name: string;
+  exercises: WorkoutRoutineExercise[];
+  completedAt: Date;
+  setResults: WorkoutHistorySetResult[];
+}
+
 interface AuthContextType {
   user: User | null;
   isAuthLoading: boolean;
@@ -32,16 +66,35 @@ interface AuthContextType {
   signup: (email: string, password: string, name: string) => Promise<void>;
   logout: () => void;
   updateSubscription: (tier: 'basic' | 'premium') => void;
-  addWorkoutRoutine: (routine: Omit<WorkoutRoutine, 'id' | 'createdAt'>) => void;
+  addWorkoutRoutine: (routine: Omit<WorkoutRoutine, 'id' | 'createdAt'>) => Promise<void>;
+  updateWorkoutRoutine: (routineId: string, updates: Omit<WorkoutRoutine, 'id' | 'createdAt'>) => Promise<void>;
+  deleteWorkoutRoutine: (routineId: string) => Promise<void>;
+  addCompletedWorkout: (workout: Omit<WorkoutHistoryEntry, 'id' | 'completedAt'> & { completedAt?: Date }) => Promise<void>;
   addExerciseSession: (session: Omit<ExerciseSession, 'id'>) => Promise<void>;
 }
+
+type BackendWorkoutRoutine = {
+  id: string;
+  name: string;
+  exercises: Array<string | WorkoutRoutineExercise>;
+  createdAt: string | Date;
+};
+
+type BackendWorkoutHistoryEntry = {
+  id: string;
+  name: string;
+  exercises: Array<string | WorkoutRoutineExercise>;
+  completedAt: string | Date;
+  setResults?: WorkoutHistorySetResult[];
+};
 
 type BackendUser = {
   id: string;
   email: string;
   name: string;
   subscription: 'basic' | 'premium';
-  workoutRoutines?: WorkoutRoutine[];
+  workoutRoutines?: BackendWorkoutRoutine[];
+  workoutHistory?: BackendWorkoutHistoryEntry[];
   exerciseHistory?: ExerciseSession[];
 };
 
@@ -68,7 +121,31 @@ const AUTH_USER_KEY = 'smartfit_auth_user';
 function normalizeUser(user: BackendUser): User {
   return {
     ...user,
-    workoutRoutines: user.workoutRoutines ?? [],
+    workoutRoutines: (user.workoutRoutines ?? []).map((routine) => ({
+      ...routine,
+      exercises: routine.exercises.map((exercise) =>
+        typeof exercise === 'string'
+          ? { name: exercise, sets: 1 }
+          : { name: exercise.name, sets: Math.max(1, exercise.sets) },
+      ),
+      createdAt: new Date(routine.createdAt),
+    })),
+    workoutHistory: (user.workoutHistory ?? []).map((workout) => ({
+      ...workout,
+      exercises: workout.exercises.map((exercise) =>
+        typeof exercise === 'string'
+          ? { name: exercise, sets: 1 }
+          : { name: exercise.name, sets: Math.max(1, exercise.sets) },
+      ),
+      setResults: (workout.setResults ?? []).map((setResult) => ({
+        ...setResult,
+        source: setResult.source === 'webcam' ? 'webcam' : 'upload',
+        setNumber: Math.max(1, setResult.setNumber),
+        repCount: Math.max(0, setResult.repCount),
+        currentQuality: Math.max(0, setResult.currentQuality),
+      })),
+      completedAt: new Date(workout.completedAt),
+    })),
     exerciseHistory: (user.exerciseHistory ?? []).map((session) => ({
       ...session,
       date: new Date(session.date),
@@ -137,7 +214,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const normalizedUser = normalizeUser(backendUser);
         setUser((existingUser) => ({
           ...normalizedUser,
-          workoutRoutines: existingUser?.workoutRoutines ?? normalizedUser.workoutRoutines,
+          workoutRoutines: normalizedUser.workoutRoutines,
+          workoutHistory: normalizedUser.workoutHistory,
           exerciseHistory: normalizedUser.exerciseHistory,
         }));
       })
@@ -210,24 +288,180 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
   };
 
-  const addWorkoutRoutine = (routine: Omit<WorkoutRoutine, 'id' | 'createdAt'>) => {
+  const addWorkoutRoutine = async (routine: Omit<WorkoutRoutine, 'id' | 'createdAt'>) => {
+    const token = localStorage.getItem(AUTH_TOKEN_KEY);
+    if (!token) {
+      throw new Error('You must be logged in to save a workout routine.');
+    }
+
+    const response = await fetch(`${BACKEND_BASE_URL}/api/v1/routines`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(routine),
+    });
+
+    if (!response.ok) {
+      throw new Error(await parseError(response));
+    }
+
+    const savedRoutine = (await response.json()) as BackendWorkoutRoutine;
+
     setUser((existingUser) => {
       if (!existingUser) {
         return existingUser;
       }
-      const newRoutine = {
-        ...routine,
-        id: Date.now().toString(),
-        createdAt: new Date(),
+      const normalizedRoutine = {
+        ...savedRoutine,
+        exercises: savedRoutine.exercises.map((exercise) =>
+          typeof exercise === 'string'
+            ? { name: exercise, sets: 1 }
+            : { name: exercise.name, sets: Math.max(1, exercise.sets) },
+        ),
+        createdAt: new Date(savedRoutine.createdAt),
       };
       const updatedUser = {
         ...existingUser,
-        workoutRoutines: [...existingUser.workoutRoutines, newRoutine],
+        workoutRoutines: [normalizedRoutine, ...existingUser.workoutRoutines],
       };
-      const token = localStorage.getItem(AUTH_TOKEN_KEY);
-      if (token) {
-        storeAuth(token, updatedUser);
+      storeAuth(token, updatedUser);
+      return updatedUser;
+    });
+  };
+
+  const updateWorkoutRoutine = async (
+    routineId: string,
+    updates: Omit<WorkoutRoutine, 'id' | 'createdAt'>,
+  ) => {
+    const token = localStorage.getItem(AUTH_TOKEN_KEY);
+    if (!token) {
+      throw new Error('You must be logged in to update a workout routine.');
+    }
+
+    const response = await fetch(`${BACKEND_BASE_URL}/api/v1/routines/${routineId}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(updates),
+    });
+
+    if (!response.ok) {
+      throw new Error(await parseError(response));
+    }
+
+    const savedRoutine = (await response.json()) as BackendWorkoutRoutine;
+
+    setUser((existingUser) => {
+      if (!existingUser) {
+        return existingUser;
       }
+      const normalizedRoutine = {
+        ...savedRoutine,
+        exercises: savedRoutine.exercises.map((exercise) =>
+          typeof exercise === 'string'
+            ? { name: exercise, sets: 1 }
+            : { name: exercise.name, sets: Math.max(1, exercise.sets) },
+        ),
+        createdAt: new Date(savedRoutine.createdAt),
+      };
+      const updatedUser = {
+        ...existingUser,
+        workoutRoutines: existingUser.workoutRoutines.map((routine) =>
+          routine.id === routineId ? normalizedRoutine : routine,
+        ),
+      };
+      storeAuth(token, updatedUser);
+      return updatedUser;
+    });
+  };
+
+  const deleteWorkoutRoutine = async (routineId: string) => {
+    const token = localStorage.getItem(AUTH_TOKEN_KEY);
+    if (!token) {
+      throw new Error('You must be logged in to delete a workout routine.');
+    }
+
+    const response = await fetch(`${BACKEND_BASE_URL}/api/v1/routines/${routineId}`, {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(await parseError(response));
+    }
+
+    setUser((existingUser) => {
+      if (!existingUser) {
+        return existingUser;
+      }
+      const updatedUser = {
+        ...existingUser,
+        workoutRoutines: existingUser.workoutRoutines.filter((routine) => routine.id !== routineId),
+      };
+      storeAuth(token, updatedUser);
+      return updatedUser;
+    });
+  };
+
+  const addCompletedWorkout = async (
+    workout: Omit<WorkoutHistoryEntry, 'id' | 'completedAt'> & { completedAt?: Date },
+  ) => {
+    const token = localStorage.getItem(AUTH_TOKEN_KEY);
+    if (!token) {
+      throw new Error('You must be logged in to save workout history.');
+    }
+
+    const completedAt = workout.completedAt ?? new Date();
+    const response = await fetch(`${BACKEND_BASE_URL}/api/v1/workouts`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        name: workout.name,
+        exercises: workout.exercises,
+        completedAt: completedAt.toISOString(),
+        setResults: workout.setResults ?? [],
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(await parseError(response));
+    }
+
+    const savedWorkout = (await response.json()) as BackendWorkoutHistoryEntry;
+    setUser((existingUser) => {
+      if (!existingUser) {
+        return existingUser;
+      }
+      const normalizedWorkout = {
+        ...savedWorkout,
+        exercises: savedWorkout.exercises.map((exercise) =>
+          typeof exercise === 'string'
+            ? { name: exercise, sets: 1 }
+            : { name: exercise.name, sets: Math.max(1, exercise.sets) },
+        ),
+        setResults: (savedWorkout.setResults ?? []).map((setResult) => ({
+          ...setResult,
+          source: setResult.source === 'webcam' ? 'webcam' : 'upload',
+          setNumber: Math.max(1, setResult.setNumber),
+          repCount: Math.max(0, setResult.repCount),
+          currentQuality: Math.max(0, setResult.currentQuality),
+        })),
+        completedAt: new Date(savedWorkout.completedAt),
+      };
+      const updatedUser = {
+        ...existingUser,
+        workoutHistory: [normalizedWorkout, ...existingUser.workoutHistory],
+      };
+      storeAuth(token, updatedUser);
       return updatedUser;
     });
   };
@@ -273,7 +507,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <AuthContext.Provider
-      value={{ user, isAuthLoading, login, signup, logout, updateSubscription, addWorkoutRoutine, addExerciseSession }}
+      value={{
+        user,
+        isAuthLoading,
+        login,
+        signup,
+        logout,
+        updateSubscription,
+        addWorkoutRoutine,
+        updateWorkoutRoutine,
+        deleteWorkoutRoutine,
+        addCompletedWorkout,
+        addExerciseSession,
+      }}
     >
       {children}
     </AuthContext.Provider>

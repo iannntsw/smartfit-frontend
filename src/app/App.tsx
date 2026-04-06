@@ -9,6 +9,8 @@ import { LiveTraining } from './components/LiveTraining';
 import { Subscription } from './components/Subscription';
 import { Partnerships } from './components/Partnerships';
 import { BookTrainer } from './components/BookTrainer';
+import { StartWorkout } from './components/StartWorkout';
+import { WorkoutHistoryDetails } from './components/WorkoutHistoryDetails';
 import { Toaster } from './components/ui/sonner';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -42,10 +44,26 @@ function AppRoutes() {
         }
       />
       <Route
+        path="/profile/workouts/:workoutId"
+        element={
+          <ProtectedRoute>
+            <WorkoutHistoryDetails />
+          </ProtectedRoute>
+        }
+      />
+      <Route
         path="/live-training"
         element={
           <ProtectedRoute>
             <LiveTraining />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/start-workout"
+        element={
+          <ProtectedRoute>
+            <StartWorkout />
           </ProtectedRoute>
         }
       />
