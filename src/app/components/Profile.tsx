@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useAuth } from '../contexts/AuthContext';
 import { Button } from './ui/button';
@@ -9,11 +9,21 @@ import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, L
 import { toast } from 'sonner';
 
 export function Profile() {
-  const { user, updateWorkoutRoutine, deleteWorkoutRoutine } = useAuth();
+  const { user, updateWorkoutRoutine, deleteWorkoutRoutine, updateSensorSetup } = useAuth();
   const navigate = useNavigate();
   const [editingRoutineKey, setEditingRoutineKey] = useState('');
   const [deletingRoutineId, setDeletingRoutineId] = useState('');
+  const [sensorDeviceName, setSensorDeviceName] = useState('');
+  const [sensorBleAddress, setSensorBleAddress] = useState('');
+  const [sensorNotes, setSensorNotes] = useState('');
+  const [isSavingSensorSetup, setIsSavingSensorSetup] = useState(false);
   const isPremium = user?.subscription === 'premium';
+
+  useEffect(() => {
+    setSensorDeviceName(user?.sensorSetup?.deviceName ?? '');
+    setSensorBleAddress(user?.sensorSetup?.bleAddress ?? '');
+    setSensorNotes(user?.sensorSetup?.notes ?? '');
+  }, [user?.sensorSetup]);
 
   // Process exercise data for charts
   const qualityData = user?.exerciseHistory
@@ -139,6 +149,22 @@ export function Profile() {
     }
   };
 
+  const handleSaveSensorSetup = async () => {
+    setIsSavingSensorSetup(true);
+    try {
+      await updateSensorSetup({
+        deviceName: sensorDeviceName.trim() || null,
+        bleAddress: sensorBleAddress.trim(),
+        notes: sensorNotes.trim() || null,
+      });
+      toast.success('Micro:bit sensor setup saved.');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Unable to save sensor setup.');
+    } finally {
+      setIsSavingSensorSetup(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
@@ -173,6 +199,67 @@ export function Profile() {
               </Badge>
             </div>
           </CardHeader>
+        </Card>
+
+        <Card className="mb-8">
+          <CardHeader>
+            <CardTitle>Sensor Setup</CardTitle>
+            <CardDescription>
+              Save your micro:bit details once so curl sensor fusion can reuse them in later sessions.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <label className="text-sm text-gray-600" htmlFor="sensor-device-name">
+                  Device Name
+                </label>
+                <input
+                  id="sensor-device-name"
+                  value={sensorDeviceName}
+                  onChange={(event) => setSensorDeviceName(event.target.value)}
+                  placeholder="Ian's Micro:bit"
+                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm text-gray-600" htmlFor="sensor-ble-address">
+                  BLE Address
+                </label>
+                <input
+                  id="sensor-ble-address"
+                  value={sensorBleAddress}
+                  onChange={(event) => setSensorBleAddress(event.target.value)}
+                  placeholder="AA:BB:CC:DD:EE:FF"
+                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                />
+              </div>
+            </div>
+            <div className="mt-4 space-y-2">
+              <label className="text-sm text-gray-600" htmlFor="sensor-notes">
+                Notes
+              </label>
+              <textarea
+                id="sensor-notes"
+                value={sensorNotes}
+                onChange={(event) => setSensorNotes(event.target.value)}
+                placeholder="e.g. Right wrist strap, USB-registered at home laptop"
+                rows={3}
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+              />
+            </div>
+            <div className="mt-4 flex items-center justify-between gap-3">
+              <p className="text-xs text-gray-500">
+                Use the BLE address shown by your sensor setup flow or local logger pairing screen.
+              </p>
+              <Button
+                onClick={handleSaveSensorSetup}
+                disabled={isSavingSensorSetup || !sensorBleAddress.trim()}
+              >
+                {isSavingSensorSetup ? 'Saving...' : 'Save Sensor Setup'}
+              </Button>
+            </div>
+          </CardContent>
         </Card>
 
         {/* Stats Overview */}
