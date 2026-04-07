@@ -8,6 +8,16 @@ interface User {
   workoutRoutines: WorkoutRoutine[];
   workoutHistory: WorkoutHistoryEntry[];
   exerciseHistory: ExerciseSession[];
+  sensorSetup?: SensorSetup | null;
+}
+
+interface SensorSetup {
+  id: string;
+  deviceName?: string | null;
+  bleAddress?: string | null;
+  notes?: string | null;
+  createdAt: Date;
+  updatedAt?: Date | null;
 }
 
 interface WorkoutRoutine {
@@ -72,6 +82,7 @@ interface AuthContextType {
   deleteWorkoutRoutine: (routineId: string) => Promise<void>;
   addCompletedWorkout: (workout: Omit<WorkoutHistoryEntry, 'id' | 'completedAt'> & { completedAt?: Date }) => Promise<void>;
   addExerciseSession: (session: Omit<ExerciseSession, 'id'>) => Promise<void>;
+  updateSensorSetup: (setup: Omit<SensorSetup, 'id' | 'createdAt' | 'updatedAt'>) => Promise<void>;
 }
 
 type BackendWorkoutRoutine = {
@@ -97,6 +108,16 @@ type BackendUser = {
   workoutRoutines?: BackendWorkoutRoutine[];
   workoutHistory?: BackendWorkoutHistoryEntry[];
   exerciseHistory?: ExerciseSession[];
+  sensorSetup?: BackendSensorSetup | null;
+};
+
+type BackendSensorSetup = {
+  id: string;
+  deviceName?: string | null;
+  bleAddress?: string | null;
+  notes?: string | null;
+  createdAt: string | Date;
+  updatedAt?: string | Date | null;
 };
 
 type AuthResponse = {
@@ -153,6 +174,13 @@ function normalizeUser(user: BackendUser): User {
       ...session,
       date: new Date(session.date),
     })),
+    sensorSetup: user.sensorSetup
+      ? {
+          ...user.sensorSetup,
+          createdAt: new Date(user.sensorSetup.createdAt),
+          updatedAt: user.sensorSetup.updatedAt ? new Date(user.sensorSetup.updatedAt) : null,
+        }
+      : null,
   };
 }
 
@@ -537,6 +565,43 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
   };
 
+  const updateSensorSetup = async (setup: Omit<SensorSetup, 'id' | 'createdAt' | 'updatedAt'>) => {
+    const token = localStorage.getItem(AUTH_TOKEN_KEY);
+    if (!token) {
+      throw new Error('You must be logged in to save sensor setup.');
+    }
+
+    const response = await fetch(`${BACKEND_BASE_URL}/api/v1/profile/sensor-setup`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(setup),
+    });
+
+    if (!response.ok) {
+      throw new Error(await parseError(response));
+    }
+
+    const savedSetup = (await response.json()) as BackendSensorSetup;
+    setUser((existingUser) => {
+      if (!existingUser) {
+        return existingUser;
+      }
+      const updatedUser = {
+        ...existingUser,
+        sensorSetup: {
+          ...savedSetup,
+          createdAt: new Date(savedSetup.createdAt),
+          updatedAt: savedSetup.updatedAt ? new Date(savedSetup.updatedAt) : null,
+        },
+      };
+      storeAuth(token, updatedUser);
+      return updatedUser;
+    });
+  };
+
   return (
     <AuthContext.Provider
       value={{
@@ -552,6 +617,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         deleteWorkoutRoutine,
         addCompletedWorkout,
         addExerciseSession,
+        updateSensorSetup,
       }}
     >
       {children}
