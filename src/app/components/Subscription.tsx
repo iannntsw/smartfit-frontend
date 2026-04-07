@@ -1,27 +1,38 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router';
+import { useLocation, useNavigate } from 'react-router';
 import { useAuth } from '../contexts/AuthContext';
 import { Button } from './ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { Badge } from './ui/badge';
 import { ArrowLeft, Check, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
+import { createPremiumCheckoutSession } from '../lib/billing';
 
 export function Subscription() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { user, updateSubscription } = useAuth();
   const [isProcessing, setIsProcessing] = useState(false);
 
   const handleUpgrade = async (tier: 'basic' | 'premium') => {
     setIsProcessing(true);
+    try {
+      if (tier === 'premium') {
+        const checkoutSession = await createPremiumCheckoutSession();
+        window.location.assign(checkoutSession.checkoutUrl);
+        return;
+      }
 
-    // Simulate payment processing
-    await new Promise(resolve => setTimeout(resolve, 1500));
-
-    updateSubscription(tier);
-    toast.success(`Successfully ${tier === 'premium' ? 'upgraded to' : 'downgraded to'} ${tier}!`);
-    setIsProcessing(false);
+      await updateSubscription(tier);
+      toast.success(`Successfully moved to ${tier}.`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Unable to update your subscription.');
+    } finally {
+      setIsProcessing(false);
+    }
   };
+
+  const checkoutWasCancelled = new URLSearchParams(location.search).get('checkout') === 'cancelled';
 
   const plans = [
     {
@@ -83,6 +94,14 @@ export function Subscription() {
           <p className="text-xl text-gray-600">
             Unlock your full potential with AI-powered coaching
           </p>
+          <p className="mt-3 text-sm text-gray-500">
+            Premium upgrades are handled through Stripe Checkout.
+          </p>
+          {checkoutWasCancelled ? (
+            <p className="mt-2 text-sm text-amber-700">
+              Checkout was canceled. Your plan was not changed.
+            </p>
+          ) : null}
         </div>
 
         {/* Current Plan */}
@@ -218,6 +237,7 @@ export function Subscription() {
           </div>
         </div>
       </div>
+
     </div>
   );
 }

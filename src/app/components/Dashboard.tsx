@@ -254,6 +254,10 @@ export function Dashboard() {
     }
   };
 
+  const handleUpgradeClick = () => {
+    navigate('/subscription');
+  };
+
   return (
     <div className="min-h-screen bg-gray-50">
       <header className="bg-white border-b">
@@ -328,13 +332,15 @@ export function Dashboard() {
             </CardHeader>
           </Card>
 
-          <Card className="cursor-pointer hover:shadow-lg transition-shadow" onClick={() => navigate('/subscription')}>
+          <Card className="cursor-pointer hover:shadow-lg transition-shadow" onClick={handleUpgradeClick}>
             <CardHeader className="pb-3">
               <div className="w-12 h-12 bg-purple-100 rounded-lg flex items-center justify-center mb-2">
                 <CreditCard className="w-6 h-6 text-purple-600" />
               </div>
               <CardTitle className="text-lg">Upgrade</CardTitle>
-              <CardDescription>Unlock premium features</CardDescription>
+              <CardDescription>
+                {user?.subscription === 'premium' ? 'Manage premium plan' : 'Unlock premium features'}
+              </CardDescription>
             </CardHeader>
           </Card>
 
@@ -613,6 +619,7 @@ export function Dashboard() {
             </CardContent>
           </Card>
         </div>
+
       </div>
     </div>
   );
