@@ -34,6 +34,7 @@ export function Dashboard() {
   const { user, logout, addWorkoutRoutine, updateWorkoutRoutine, deleteWorkoutRoutine } = useAuth();
   const navigate = useNavigate();
   const [isRoutineDialogOpen, setIsRoutineDialogOpen] = useState(false);
+  const [editingRoutineId, setEditingRoutineId] = useState('');
   const [routineName, setRoutineName] = useState('');
   const [selectedRoutineExercises, setSelectedRoutineExercises] = useState<RoutineExerciseDraft[]>([]);
   const [routineError, setRoutineError] = useState('');
@@ -68,6 +69,7 @@ export function Dashboard() {
   };
 
   const resetRoutineForm = () => {
+    setEditingRoutineId('');
     setRoutineName('');
     setSelectedRoutineExercises([]);
     setRoutineError('');
@@ -102,7 +104,20 @@ export function Dashboard() {
     );
   };
 
-  const handleCreateRoutine = async (event: FormEvent<HTMLFormElement>) => {
+  const handleOpenEditRoutine = (routineId: string) => {
+    const routine = user?.workoutRoutines.find((item) => item.id === routineId);
+    if (!routine) {
+      return;
+    }
+
+    setEditingRoutineId(routine.id);
+    setRoutineName(routine.name);
+    setSelectedRoutineExercises(routine.exercises.map((exercise) => ({ ...exercise })));
+    setRoutineError('');
+    setIsRoutineDialogOpen(true);
+  };
+
+  const handleSaveRoutine = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
 
     const trimmedName = routineName.trim();
@@ -118,14 +133,22 @@ export function Dashboard() {
     setIsSavingRoutine(true);
     setRoutineError('');
     try {
-      await addWorkoutRoutine({
-        name: trimmedName,
-        exercises: selectedRoutineExercises,
-      });
-      toast.success(`Saved "${trimmedName}" with per-set session launch.`);
+      if (editingRoutineId) {
+        await updateWorkoutRoutine(editingRoutineId, {
+          name: trimmedName,
+          exercises: selectedRoutineExercises,
+        });
+        toast.success(`Updated "${trimmedName}".`);
+      } else {
+        await addWorkoutRoutine({
+          name: trimmedName,
+          exercises: selectedRoutineExercises,
+        });
+        toast.success(`Saved "${trimmedName}".`);
+      }
       handleDialogChange(false);
     } catch (error) {
-      setRoutineError(error instanceof Error ? error.message : 'Unable to create routine.');
+      setRoutineError(error instanceof Error ? error.message : 'Unable to save routine.');
     } finally {
       setIsSavingRoutine(false);
     }
@@ -384,16 +407,25 @@ export function Dashboard() {
                         <p className="text-xs text-gray-400">
                           Created {new Date(routine.createdAt).toLocaleDateString()}
                         </p>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="text-red-600 hover:text-red-700"
-                          disabled={deletingRoutineId === routine.id}
-                          onClick={() => handleDeleteRoutine(routine.id, routine.name)}
-                        >
-                          <X className="mr-2 h-4 w-4" />
-                          Delete
-                        </Button>
+                        <div className="flex items-center gap-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => handleOpenEditRoutine(routine.id)}
+                          >
+                            Edit Routine
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="text-red-600 hover:text-red-700"
+                            disabled={deletingRoutineId === routine.id}
+                            onClick={() => handleDeleteRoutine(routine.id, routine.name)}
+                          >
+                            <X className="mr-2 h-4 w-4" />
+                            Delete
+                          </Button>
+                        </div>
                       </div>
 
                       <div className="space-y-3">
@@ -476,10 +508,14 @@ export function Dashboard() {
         <Dialog open={isRoutineDialogOpen} onOpenChange={handleDialogChange}>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Create Workout Routine</DialogTitle>
-              <DialogDescription>Choose exercises and set counts for a reusable routine.</DialogDescription>
+              <DialogTitle>{editingRoutineId ? 'Edit Workout Routine' : 'Create Workout Routine'}</DialogTitle>
+              <DialogDescription>
+                {editingRoutineId
+                  ? 'Update the routine name, adjust set counts, or add more exercises.'
+                  : 'Choose exercises and set counts for a reusable routine.'}
+              </DialogDescription>
             </DialogHeader>
-            <form className="space-y-5" onSubmit={handleCreateRoutine}>
+            <form className="space-y-5" onSubmit={handleSaveRoutine}>
               <div className="space-y-2">
                 <Label htmlFor="routine-name">Routine name</Label>
                 <Input
@@ -543,7 +579,7 @@ export function Dashboard() {
                   Cancel
                 </Button>
                 <Button type="submit" disabled={isSavingRoutine}>
-                  {isSavingRoutine ? 'Saving...' : 'Save Routine'}
+                  {isSavingRoutine ? 'Saving...' : editingRoutineId ? 'Save Changes' : 'Save Routine'}
                 </Button>
               </DialogFooter>
             </form>
