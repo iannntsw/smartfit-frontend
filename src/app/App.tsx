@@ -7,6 +7,7 @@ import { Dashboard } from './components/Dashboard';
 import { Profile } from './components/Profile';
 import { LiveTraining } from './components/LiveTraining';
 import { Subscription } from './components/Subscription';
+import { SubscriptionSuccess } from './components/SubscriptionSuccess';
 import { Partnerships } from './components/Partnerships';
 import { BookTrainer } from './components/BookTrainer';
 import { StartWorkout } from './components/StartWorkout';
@@ -80,6 +81,14 @@ function AppRoutes() {
         element={
           <ProtectedRoute>
             <Subscription />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/subscription/success"
+        element={
+          <ProtectedRoute>
+            <SubscriptionSuccess />
           </ProtectedRoute>
         }
       />

@@ -13,6 +13,7 @@ export function Profile() {
   const navigate = useNavigate();
   const [editingRoutineKey, setEditingRoutineKey] = useState('');
   const [deletingRoutineId, setDeletingRoutineId] = useState('');
+  const isPremium = user?.subscription === 'premium';
 
   // Process exercise data for charts
   const qualityData = user?.exerciseHistory
@@ -216,48 +217,61 @@ export function Profile() {
           </Card>
         </div>
 
-        {/* Exercise Quality Over Time */}
-        <Card className="mb-8">
-          <CardHeader>
-            <CardTitle>Exercise Quality Trends</CardTitle>
-            <CardDescription>Track your form improvement over the last 14 sessions</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <ResponsiveContainer width="100%" height={300}>
-              <LineChart data={qualityData}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="day" />
-                <YAxis />
-                <Tooltip />
-                <Legend />
-                <Line type="monotone" dataKey="quality" stroke="#4f46e5" strokeWidth={2} name="Rep Quality (%)" />
-                <Line type="monotone" dataKey="drift" stroke="#ef4444" strokeWidth={2} name="Drift (%)" />
-              </LineChart>
-            </ResponsiveContainer>
-          </CardContent>
-        </Card>
+        {isPremium ? (
+          <>
+            <Card className="mb-8">
+              <CardHeader>
+                <CardTitle>Exercise Quality Trends</CardTitle>
+                <CardDescription>Track your form improvement over the last 14 sessions</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <ResponsiveContainer width="100%" height={300}>
+                  <LineChart data={qualityData}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="day" />
+                    <YAxis />
+                    <Tooltip />
+                    <Legend />
+                    <Line type="monotone" dataKey="quality" stroke="#4f46e5" strokeWidth={2} name="Rep Quality (%)" />
+                    <Line type="monotone" dataKey="drift" stroke="#ef4444" strokeWidth={2} name="Drift (%)" />
+                  </LineChart>
+                </ResponsiveContainer>
+              </CardContent>
+            </Card>
 
-        {/* Exercise Breakdown */}
-        <Card className="mb-8">
-          <CardHeader>
-            <CardTitle>Exercise Distribution</CardTitle>
-            <CardDescription>Number of sessions per exercise type</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <ResponsiveContainer width="100%" height={300}>
-              <BarChart data={exerciseData}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="exercise" />
-                <YAxis />
-                <Tooltip />
-                <Legend />
-                <Bar dataKey="sessions" fill="#4f46e5" name="Sessions Completed" />
-              </BarChart>
-            </ResponsiveContainer>
-          </CardContent>
-        </Card>
+            <Card className="mb-8">
+              <CardHeader>
+                <CardTitle>Exercise Distribution</CardTitle>
+                <CardDescription>Number of sessions per exercise type</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <ResponsiveContainer width="100%" height={300}>
+                  <BarChart data={exerciseData}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="exercise" />
+                    <YAxis />
+                    <Tooltip />
+                    <Legend />
+                    <Bar dataKey="sessions" fill="#4f46e5" name="Sessions Completed" />
+                  </BarChart>
+                </ResponsiveContainer>
+              </CardContent>
+            </Card>
+          </>
+        ) : (
+          <Card className="mb-8 border-indigo-200 bg-gradient-to-r from-indigo-50 to-purple-50">
+            <CardHeader>
+              <CardTitle>Premium Analytics & Routines</CardTitle>
+              <CardDescription>
+                Upgrade to unlock exercise trends, drift analytics, and your custom routine library.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Button onClick={() => navigate('/subscription')}>Upgrade to Premium</Button>
+            </CardContent>
+          </Card>
+        )}
 
-        {/* Workout Routines */}
         <Card>
           <CardHeader>
             <CardTitle>Saved Workout Routines</CardTitle>

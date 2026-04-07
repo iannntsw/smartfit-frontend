@@ -280,6 +280,7 @@ export function LiveTraining() {
   const location = useLocation();
   const locationState = (location.state ?? {}) as LiveTrainingLocationState;
   const { user, addExerciseSession } = useAuth();
+  const isPremium = user?.subscription === 'premium';
 
   const webcamRef = useRef<Webcam>(null);
   const uploadedVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -492,6 +493,13 @@ export function LiveTraining() {
     prediction: LatestPrediction,
     sensorContext: Record<string, number | string> | null = null,
   ) => {
+    if (!isPremium) {
+      setCoachLoading(false);
+      setCoachError('');
+      setCoachResponse(null);
+      return;
+    }
+
     const exerciseSlug = getExerciseSlug(selectedExercise);
     setCoachLoading(true);
     setCoachError('');
@@ -1349,10 +1357,21 @@ export function LiveTraining() {
           <Card>
             <CardHeader>
               <CardTitle>AI Coaching</CardTitle>
-              <CardDescription>LLM guidance generated from CV features and form predictions</CardDescription>
+              <CardDescription>
+                {isPremium
+                  ? 'LLM guidance generated from CV features and form predictions'
+                  : 'Premium feature for AI-suggested improvements and coaching'}
+              </CardDescription>
             </CardHeader>
             <CardContent>
-              {coachLoading ? (
+              {!isPremium ? (
+                <div className="space-y-3 text-sm">
+                  <p className="text-gray-600">
+                    Upgrade to Premium to unlock AI-suggested improvements, personalized cues, and safety notes after each set.
+                  </p>
+                  <Button onClick={() => navigate('/subscription')}>Upgrade to Premium</Button>
+                </div>
+              ) : coachLoading ? (
                 <p className="text-sm text-gray-500">Generating coaching guidance...</p>
               ) : coachError ? (
                 <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">

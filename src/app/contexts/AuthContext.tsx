@@ -65,7 +65,8 @@ interface AuthContextType {
   login: (email: string, password: string) => Promise<void>;
   signup: (email: string, password: string, name: string) => Promise<void>;
   logout: () => void;
-  updateSubscription: (tier: 'basic' | 'premium') => void;
+  updateSubscription: (tier: 'basic' | 'premium') => Promise<void>;
+  refreshUser: () => Promise<void>;
   addWorkoutRoutine: (routine: Omit<WorkoutRoutine, 'id' | 'createdAt'>) => Promise<void>;
   updateWorkoutRoutine: (routineId: string, updates: Omit<WorkoutRoutine, 'id' | 'createdAt'>) => Promise<void>;
   deleteWorkoutRoutine: (routineId: string) => Promise<void>;
@@ -103,6 +104,8 @@ type AuthResponse = {
   token_type: string;
   user: BackendUser;
 };
+
+type SubscriptionUpdateResponse = BackendUser;
 
 type BackendExerciseSession = {
   id: string;
@@ -183,6 +186,36 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState(true);
 
+  const syncUser = (backendUser: BackendUser, tokenOverride?: string | null) => {
+    const normalizedUser = normalizeUser(backendUser);
+    setUser(normalizedUser);
+    const token = tokenOverride ?? localStorage.getItem(AUTH_TOKEN_KEY);
+    if (token) {
+      storeAuth(token, normalizedUser);
+    }
+    return normalizedUser;
+  };
+
+  const refreshUser = async () => {
+    const token = localStorage.getItem(AUTH_TOKEN_KEY);
+    if (!token) {
+      throw new Error('You must be logged in.');
+    }
+
+    const response = await fetch(`${BACKEND_BASE_URL}/api/v1/auth/me`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(await parseError(response));
+    }
+
+    const backendUser = (await response.json()) as BackendUser;
+    syncUser(backendUser, token);
+  };
+
   useEffect(() => {
     const token = localStorage.getItem(AUTH_TOKEN_KEY);
     const rawUser = localStorage.getItem(AUTH_USER_KEY);
@@ -211,13 +244,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return response.json() as Promise<BackendUser>;
       })
       .then((backendUser) => {
-        const normalizedUser = normalizeUser(backendUser);
-        setUser((existingUser) => ({
-          ...normalizedUser,
-          workoutRoutines: normalizedUser.workoutRoutines,
-          workoutHistory: normalizedUser.workoutHistory,
-          exerciseHistory: normalizedUser.exerciseHistory,
-        }));
+        syncUser(backendUser, token);
       })
       .catch(() => {
         clearStoredAuth();
@@ -242,9 +269,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     const payload = (await response.json()) as AuthResponse;
-    const normalizedUser = normalizeUser(payload.user);
-    setUser(normalizedUser);
-    storeAuth(payload.access_token, normalizedUser);
+    syncUser(payload.user, payload.access_token);
     setIsAuthLoading(false);
   };
 
@@ -262,9 +287,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     const payload = (await response.json()) as AuthResponse;
-    const normalizedUser = normalizeUser(payload.user);
-    setUser(normalizedUser);
-    storeAuth(payload.access_token, normalizedUser);
+    syncUser(payload.user, payload.access_token);
     setIsAuthLoading(false);
   };
 
@@ -274,18 +297,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setIsAuthLoading(false);
   };
 
-  const updateSubscription = (tier: 'basic' | 'premium') => {
-    setUser((existingUser) => {
-      if (!existingUser) {
-        return existingUser;
-      }
-      const updatedUser = { ...existingUser, subscription: tier };
-      const token = localStorage.getItem(AUTH_TOKEN_KEY);
-      if (token) {
-        storeAuth(token, updatedUser);
-      }
-      return updatedUser;
+  const updateSubscription = async (tier: 'basic' | 'premium') => {
+    const token = localStorage.getItem(AUTH_TOKEN_KEY);
+    if (!token) {
+      throw new Error('You must be logged in to update a subscription.');
+    }
+
+    const response = await fetch(`${BACKEND_BASE_URL}/api/v1/auth/subscription`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ tier }),
     });
+
+    if (!response.ok) {
+      throw new Error(await parseError(response));
+    }
+
+    const backendUser = (await response.json()) as SubscriptionUpdateResponse;
+    syncUser(backendUser, token);
   };
 
   const addWorkoutRoutine = async (routine: Omit<WorkoutRoutine, 'id' | 'createdAt'>) => {
@@ -514,6 +546,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         signup,
         logout,
         updateSubscription,
+        refreshUser,
         addWorkoutRoutine,
         updateWorkoutRoutine,
         deleteWorkoutRoutine,
