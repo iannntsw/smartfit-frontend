@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
 import { Activity, Calendar, Camera, ChevronDown, CreditCard, Dumbbell, LogOut, Plus, Trash2, TrendingUp, User, X } from 'lucide-react';
+import { Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Legend, Line, LineChart, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 
 import { useAuth } from '../contexts/AuthContext';
 import { START_WORKOUT_UPDATED_EVENT, hasActiveWorkoutSession } from '../lib/startWorkoutSession';
@@ -30,6 +31,8 @@ const exerciseOptions: ExerciseOption[] = [
   { name: 'Squats', icon: '🦵', difficulty: 'Intermediate' },
 ];
 
+const chartColors = ['#4f46e5', '#0f766e', '#ea580c', '#db2777', '#0891b2', '#65a30d'];
+
 export function Dashboard() {
   const { user, logout, addWorkoutRoutine, updateWorkoutRoutine, deleteWorkoutRoutine } = useAuth();
   const navigate = useNavigate();
@@ -47,6 +50,141 @@ export function Dashboard() {
     () => Object.fromEntries(exerciseOptions.map((exercise) => [exercise.name, exercise])),
     [],
   );
+
+  const exerciseHistory = user?.exerciseHistory ?? [];
+  const workoutHistory = user?.workoutHistory ?? [];
+
+  const progressStats = useMemo(() => {
+    const workoutsLast7Days = workoutHistory.filter((workout) => {
+      const completedAt = new Date(workout.completedAt);
+      const sevenDaysAgo = new Date();
+      sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
+      sevenDaysAgo.setHours(0, 0, 0, 0);
+      return completedAt >= sevenDaysAgo;
+    }).length;
+
+    const averageRepsPerSession = exerciseHistory.length
+      ? Math.round(exerciseHistory.reduce((sum, session) => sum + session.reps, 0) / exerciseHistory.length)
+      : 0;
+
+    const bestQuality = exerciseHistory.length
+      ? Math.round(Math.max(...exerciseHistory.map((session) => session.quality)))
+      : 0;
+
+    const workoutDates = new Set(
+      workoutHistory.map((workout) => {
+        const date = new Date(workout.completedAt);
+        return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+      }),
+    );
+
+    let streak = 0;
+    const cursor = new Date();
+    cursor.setHours(0, 0, 0, 0);
+    while (workoutDates.has(`${cursor.getFullYear()}-${cursor.getMonth()}-${cursor.getDate()}`)) {
+      streak += 1;
+      cursor.setDate(cursor.getDate() - 1);
+    }
+
+    return {
+      workoutsLast7Days,
+      averageRepsPerSession,
+      bestQuality,
+      streak,
+    };
+  }, [exerciseHistory, workoutHistory]);
+
+  const qualityTrendData = useMemo(
+    () =>
+      exerciseHistory.slice(-10).map((session, index) => ({
+        label: session.date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+        quality: Math.round(session.quality),
+        drift: Math.round(session.drift),
+        reps: session.reps,
+        exercise: session.exercise,
+        index: index + 1,
+      })),
+    [exerciseHistory],
+  );
+
+  const weeklyLoadData = useMemo(() => {
+    const buckets = new Map<string, { label: string; reps: number; workouts: number }>();
+
+    const getWeekStart = (dateValue: Date) => {
+      const nextDate = new Date(dateValue);
+      const day = nextDate.getDay();
+      const diff = day === 0 ? -6 : 1 - day;
+      nextDate.setDate(nextDate.getDate() + diff);
+      nextDate.setHours(0, 0, 0, 0);
+      return nextDate;
+    };
+
+    exerciseHistory.forEach((session) => {
+      const weekStart = getWeekStart(new Date(session.date));
+      const key = weekStart.toISOString();
+      const label = `${weekStart.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`;
+      const existing = buckets.get(key) ?? { label, reps: 0, workouts: 0 };
+      existing.reps += session.reps;
+      existing.workouts += 1;
+      buckets.set(key, existing);
+    });
+
+    return Array.from(buckets.entries())
+      .sort(([left], [right]) => new Date(left).getTime() - new Date(right).getTime())
+      .slice(-6)
+      .map(([, value]) => value);
+  }, [exerciseHistory]);
+
+  const exerciseMixData = useMemo(() => {
+    const grouped = exerciseHistory.reduce<Record<string, { exercise: string; reps: number; sessions: number }>>(
+      (accumulator, session) => {
+        const current = accumulator[session.exercise] ?? {
+          exercise: session.exercise,
+          reps: 0,
+          sessions: 0,
+        };
+        current.reps += session.reps;
+        current.sessions += 1;
+        accumulator[session.exercise] = current;
+        return accumulator;
+      },
+      {},
+    );
+
+    return Object.values(grouped)
+      .sort((left, right) => right.reps - left.reps)
+      .slice(0, 5);
+  }, [exerciseHistory]);
+
+  const consistencyData = useMemo(() => {
+    const buckets = new Map<string, { label: string; workouts: number; sets: number }>();
+
+    for (let index = 13; index >= 0; index -= 1) {
+      const date = new Date();
+      date.setDate(date.getDate() - index);
+      date.setHours(0, 0, 0, 0);
+      const key = date.toISOString();
+      buckets.set(key, {
+        label: date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+        workouts: 0,
+        sets: 0,
+      });
+    }
+
+    workoutHistory.forEach((workout) => {
+      const completedAt = new Date(workout.completedAt);
+      completedAt.setHours(0, 0, 0, 0);
+      const key = completedAt.toISOString();
+      const bucket = buckets.get(key);
+      if (!bucket) {
+        return;
+      }
+      bucket.workouts += 1;
+      bucket.sets += workout.exercises.reduce((sum, exercise) => sum + exercise.sets, 0);
+    });
+
+    return Array.from(buckets.values());
+  }, [workoutHistory]);
 
   useEffect(() => {
     const syncWorkoutDraftState = () => {
@@ -354,6 +492,140 @@ export function Dashboard() {
             </CardHeader>
           </Card>
         </div>
+
+        <Card className="mb-8">
+          <CardHeader>
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <CardTitle>Progress Insights</CardTitle>
+                <CardDescription>See how your consistency, workload, and form are changing over time</CardDescription>
+              </div>
+              <Button variant="ghost" size="sm" onClick={() => navigate('/profile')}>
+                View Full Progress
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent>
+            {exerciseHistory.length || workoutHistory.length ? (
+              <div className="space-y-6">
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+                  <div className="rounded-lg border bg-white p-4">
+                    <p className="text-sm text-gray-500">Workouts This Week</p>
+                    <p className="mt-2 text-3xl">{progressStats.workoutsLast7Days}</p>
+                    <p className="mt-1 text-xs text-gray-400">Completed in the last 7 days</p>
+                  </div>
+                  <div className="rounded-lg border bg-white p-4">
+                    <p className="text-sm text-gray-500">Avg Reps Per Session</p>
+                    <p className="mt-2 text-3xl">{progressStats.averageRepsPerSession}</p>
+                    <p className="mt-1 text-xs text-gray-400">Across all tracked exercise sessions</p>
+                  </div>
+                  <div className="rounded-lg border bg-white p-4">
+                    <p className="text-sm text-gray-500">Best Quality</p>
+                    <p className="mt-2 text-3xl">{progressStats.bestQuality}%</p>
+                    <p className="mt-1 text-xs text-gray-400">Highest single-session form score</p>
+                  </div>
+                  <div className="rounded-lg border bg-white p-4">
+                    <p className="text-sm text-gray-500">Current Streak</p>
+                    <p className="mt-2 text-3xl">{progressStats.streak}</p>
+                    <p className="mt-1 text-xs text-gray-400">{progressStats.streak === 1 ? 'Consecutive day' : 'Consecutive days'}</p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+                  <div className="rounded-xl border bg-white p-4">
+                    <div className="mb-4">
+                      <h3>Weekly Training Load</h3>
+                      <p className="text-sm text-gray-500">Track whether your workload is trending up or flattening out</p>
+                    </div>
+                    <ResponsiveContainer width="100%" height={280}>
+                      <AreaChart data={weeklyLoadData}>
+                        <defs>
+                          <linearGradient id="repsGradient" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor="#4f46e5" stopOpacity={0.35} />
+                            <stop offset="95%" stopColor="#4f46e5" stopOpacity={0.02} />
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="label" />
+                        <YAxis />
+                        <Tooltip />
+                        <Legend />
+                        <Area type="monotone" dataKey="reps" stroke="#4f46e5" fill="url(#repsGradient)" name="Total reps" />
+                        <Line type="monotone" dataKey="workouts" stroke="#0f766e" strokeWidth={2} name="Logged sessions" />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </div>
+
+                  <div className="rounded-xl border bg-white p-4">
+                    <div className="mb-4">
+                      <h3>Form Trend</h3>
+                      <p className="text-sm text-gray-500">Compare rep quality against drift over your most recent sessions</p>
+                    </div>
+                    <ResponsiveContainer width="100%" height={280}>
+                      <LineChart data={qualityTrendData}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="label" />
+                        <YAxis domain={[0, 100]} />
+                        <Tooltip />
+                        <Legend />
+                        <Line type="monotone" dataKey="quality" stroke="#4f46e5" strokeWidth={3} name="Quality %" />
+                        <Line type="monotone" dataKey="drift" stroke="#ef4444" strokeWidth={2} name="Drift %" />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+
+                  <div className="rounded-xl border bg-white p-4">
+                    <div className="mb-4">
+                      <h3>Exercise Focus</h3>
+                      <p className="text-sm text-gray-500">Understand where most of your training volume is going</p>
+                    </div>
+                    <ResponsiveContainer width="100%" height={280}>
+                      <PieChart>
+                        <Pie
+                          data={exerciseMixData}
+                          dataKey="reps"
+                          nameKey="exercise"
+                          innerRadius={60}
+                          outerRadius={95}
+                          paddingAngle={3}
+                        >
+                          {exerciseMixData.map((entry, index) => (
+                            <Cell key={entry.exercise} fill={chartColors[index % chartColors.length]} />
+                          ))}
+                        </Pie>
+                        <Tooltip />
+                        <Legend />
+                      </PieChart>
+                    </ResponsiveContainer>
+                  </div>
+
+                  <div className="rounded-xl border bg-white p-4">
+                    <div className="mb-4">
+                      <h3>Consistency Over 14 Days</h3>
+                      <p className="text-sm text-gray-500">Spot gaps in your routine before they become trends</p>
+                    </div>
+                    <ResponsiveContainer width="100%" height={280}>
+                      <BarChart data={consistencyData}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="label" minTickGap={18} />
+                        <YAxis allowDecimals={false} />
+                        <Tooltip />
+                        <Legend />
+                        <Bar dataKey="workouts" fill="#ea580c" radius={[4, 4, 0, 0]} name="Workouts" />
+                        <Bar dataKey="sets" fill="#0891b2" radius={[4, 4, 0, 0]} name="Total sets" />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-lg border border-dashed bg-white p-6 text-center">
+                <h3 className="mb-1">No progress data yet</h3>
+                <p className="text-sm text-gray-500">Complete a few workouts to unlock charts for workload, form trends, and consistency.</p>
+              </div>
+            )}
+          </CardContent>
+        </Card>
 
         <Card className="mb-8">
           <CardHeader>
