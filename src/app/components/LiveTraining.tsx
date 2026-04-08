@@ -41,6 +41,7 @@ type LiveEvent = {
   state: string;
   smoothed_elbow_angle?: number | null;
   smoothed_knee_angle?: number | null;
+  smoothed_wrist_height?: number | null;
   latest_prediction?: LatestPrediction;
   camera_angle?: string;
   landmarks?: Record<string, [number, number]>;
@@ -94,8 +95,10 @@ const SQUAT_WS_URL =
   import.meta.env.VITE_SQUAT_WS_URL ?? 'ws://127.0.0.1:8000/ws/live/squat';
 const CURL_WS_URL =
   import.meta.env.VITE_CURL_WS_URL ?? 'ws://127.0.0.1:8000/ws/live/curl';
+const SHOULDER_PRESS_WS_URL =
+  import.meta.env.VITE_SHOULDER_PRESS_WS_URL ?? 'ws://127.0.0.1:8000/ws/live/shoulder-press';
 
-const exercises = ['Push-ups', 'Squats', 'Bicep Curl', 'Dumbbell Lat Raise'];
+const exercises = ['Push-ups', 'Squats', 'Bicep Curl', 'Shoulder Press'];
 const POSE_CONNECTIONS: Array<[string, string]> = [
   ['left_shoulder', 'right_shoulder'],
   ['left_shoulder', 'left_elbow'],
@@ -133,11 +136,14 @@ function getExerciseSlug(exercise: string) {
   if (exercise === 'Bicep Curl') {
     return 'curl';
   }
+  if (exercise === 'Shoulder Press') {
+    return 'shoulder-press';
+  }
   return 'pushup';
 }
 
 function getInitialTrackerState(exercise: string) {
-  return exercise === 'Bicep Curl' ? 'waiting_bottom' : 'waiting_top';
+  return exercise === 'Bicep Curl' || exercise === 'Shoulder Press' ? 'waiting_bottom' : 'waiting_top';
 }
 
 function buildFeedbackMessages(
@@ -147,8 +153,8 @@ function buildFeedbackMessages(
   trackerState: string,
   subscription: 'basic' | 'premium' | undefined,
 ): string[] {
-  if (exercise !== 'Push-ups' && exercise !== 'Squats' && exercise !== 'Bicep Curl') {
-    return ['Live backend tracking is currently enabled for push-ups, squats, and bicep curls only.'];
+  if (exercise !== 'Push-ups' && exercise !== 'Squats' && exercise !== 'Bicep Curl' && exercise !== 'Shoulder Press') {
+    return ['Live backend tracking is currently enabled for push-ups, squats, bicep curls, and shoulder press only.'];
   }
 
   if (!prediction) {
@@ -215,6 +221,23 @@ function buildFeedbackMessages(
       default:
         messages.push(`Prediction: ${prediction.predicted_label}`);
     }
+  } else if (exercise === 'Shoulder Press') {
+    switch (prediction.predicted_label) {
+      case 'correct':
+        messages.push('Press path and lockout look stable.');
+        break;
+      case 'incomplete_lockout':
+        messages.push('Finish the press fully overhead before lowering.');
+        break;
+      case 'leaning_back':
+        messages.push('Brace your core and avoid leaning back to finish the press.');
+        break;
+      case 'too_fast':
+        messages.push('Slow the press down and control the return to shoulder level.');
+        break;
+      default:
+        messages.push(`Prediction: ${prediction.predicted_label}`);
+    }
   }
 
   if (subscription === 'premium') {
@@ -223,6 +246,8 @@ function buildFeedbackMessages(
         ? 'Premium coaching: aim for controlled top-bottom-top cycles with stable knee tracking.'
         : exercise === 'Bicep Curl'
           ? 'Premium coaching: keep the elbow quiet, use full range, and avoid using torso momentum.'
+          : exercise === 'Shoulder Press'
+            ? 'Premium coaching: drive the weights overhead with full lockout and a steady torso.'
         : 'Premium coaching: aim for smooth top-bottom-top cycles with stable hip height.',
     );
   }
@@ -546,6 +571,8 @@ export function LiveTraining() {
         ? (sessionSummary?.features?.mean_torso_angle ?? lastPrediction?.features?.mean_torso_angle ?? 0)
         : selectedExercise === 'Bicep Curl'
           ? (sessionSummary?.features?.mean_shoulder_drift ?? lastPrediction?.features?.mean_shoulder_drift ?? 0)
+          : selectedExercise === 'Shoulder Press'
+            ? (sessionSummary?.features?.mean_torso_drift ?? lastPrediction?.features?.mean_torso_drift ?? 0)
           : (sessionSummary?.features?.mean_body_alignment_error ?? lastPrediction?.features?.mean_body_alignment_error ?? 0),
     ),
   });
@@ -624,8 +651,8 @@ export function LiveTraining() {
       return;
     }
 
-    if (selectedExercise !== 'Push-ups' && selectedExercise !== 'Squats' && selectedExercise !== 'Bicep Curl') {
-      setBackendError('Video analysis is currently enabled for push-ups, squats, and bicep curls only.');
+    if (selectedExercise !== 'Push-ups' && selectedExercise !== 'Squats' && selectedExercise !== 'Bicep Curl' && selectedExercise !== 'Shoulder Press') {
+      setBackendError('Video analysis is currently enabled for push-ups, squats, bicep curls, and shoulder press only.');
       return;
     }
 
@@ -714,13 +741,15 @@ export function LiveTraining() {
     if (payload.session_id) {
       setSensorSessionId(payload.session_id);
     }
-    if (selectedExercise === 'Bicep Curl') {
+    if (selectedExercise === 'Bicep Curl' || selectedExercise === 'Shoulder Press') {
       setSensorStatus((payload.sensor_status as 'waiting' | 'connected' | undefined) ?? 'waiting');
       setSensorSampleCount(payload.sensor_sample_count ?? 0);
     }
     setSmoothedPrimaryAngle(
       selectedExercise === 'Squats'
         ? (payload.smoothed_knee_angle ?? null)
+        : selectedExercise === 'Shoulder Press'
+          ? (payload.smoothed_wrist_height ?? null)
         : (payload.smoothed_elbow_angle ?? null),
     );
 
@@ -770,6 +799,8 @@ export function LiveTraining() {
         ? SQUAT_WS_URL
         : selectedExercise === 'Bicep Curl'
           ? CURL_WS_URL
+          : selectedExercise === 'Shoulder Press'
+            ? SHOULDER_PRESS_WS_URL
           : PUSHUP_WS_URL,
     );
     socketRef.current = websocket;
@@ -801,8 +832,8 @@ export function LiveTraining() {
   };
 
   const handleStartTracking = () => {
-    if (selectedExercise !== 'Push-ups' && selectedExercise !== 'Squats' && selectedExercise !== 'Bicep Curl') {
-      setBackendError('Video analysis is currently enabled for push-ups, squats, and bicep curls only.');
+    if (selectedExercise !== 'Push-ups' && selectedExercise !== 'Squats' && selectedExercise !== 'Bicep Curl' && selectedExercise !== 'Shoulder Press') {
+      setBackendError('Video analysis is currently enabled for push-ups, squats, bicep curls, and shoulder press only.');
       return;
     }
 
@@ -824,7 +855,7 @@ export function LiveTraining() {
     setSaveSessionError('');
     setTrackerState(getInitialTrackerState(selectedExercise));
     setSensorSessionId(null);
-    setSensorStatus(selectedExercise === 'Bicep Curl' ? 'waiting' : 'not_applicable');
+    setSensorStatus(selectedExercise === 'Bicep Curl' || selectedExercise === 'Shoulder Press' ? 'waiting' : 'not_applicable');
     setSensorSampleCount(0);
     setSessionComplete(false);
     if (!useWebcam) {
@@ -928,18 +959,28 @@ export function LiveTraining() {
       </Badge>
     );
 
-  const angleMetricLabel = selectedExercise === 'Squats' ? 'Knee Angle' : 'Elbow Angle';
+  const angleMetricLabel =
+    selectedExercise === 'Squats'
+      ? 'Knee Angle'
+      : selectedExercise === 'Shoulder Press'
+        ? 'Wrist Height'
+      : 'Elbow Angle';
+  const angleMetricUnit = selectedExercise === 'Shoulder Press' ? '' : '°';
   const cameraCardDescription =
     selectedExercise === 'Squats'
       ? 'Side-view squat tracking through the FastAPI backend'
       : selectedExercise === 'Bicep Curl'
         ? 'Side-view bicep-curl tracking through the FastAPI backend'
+        : selectedExercise === 'Shoulder Press'
+          ? 'Side-view shoulder-press tracking through the FastAPI backend'
         : 'Side-view push-up tracking through the FastAPI backend';
   const latestPredictionEmptyText =
     selectedExercise === 'Squats'
       ? 'No completed squat prediction yet.'
       : selectedExercise === 'Bicep Curl'
         ? 'No completed curl prediction yet.'
+        : selectedExercise === 'Shoulder Press'
+          ? 'No completed shoulder-press prediction yet.'
       : 'No completed rep prediction yet.';
   const routineContextLabel =
     locationState.routineName && locationState.setNumber && locationState.totalSets
@@ -1156,7 +1197,7 @@ export function LiveTraining() {
                         <span>State: {formatTrackerState(trackerState)}</span>
                         <span>
                           {angleMetricLabel}:{' '}
-                          {smoothedPrimaryAngle !== null ? `${Math.round(smoothedPrimaryAngle)}°` : 'N/A'}
+                          {smoothedPrimaryAngle !== null ? `${Math.round(smoothedPrimaryAngle * (selectedExercise === 'Shoulder Press' ? 100 : 1))}${angleMetricUnit}` : 'N/A'}
                         </span>
                         <span>
                           Latest Label: {latestPrediction?.predicted_label ?? 'No completed rep yet'}
@@ -1184,7 +1225,7 @@ export function LiveTraining() {
                     <span>State: {formatTrackerState(trackerState)}</span>
                     <span>
                       {angleMetricLabel}:{' '}
-                      {smoothedPrimaryAngle !== null ? `${Math.round(smoothedPrimaryAngle)}°` : 'N/A'}
+                      {smoothedPrimaryAngle !== null ? `${Math.round(smoothedPrimaryAngle * (selectedExercise === 'Shoulder Press' ? 100 : 1))}${angleMetricUnit}` : 'N/A'}
                     </span>
                     <span>
                       Latest Label: {latestPrediction?.predicted_label ?? 'No completed rep yet'}
@@ -1272,21 +1313,23 @@ export function LiveTraining() {
                 </SelectContent>
               </Select>
               <p className="mt-3 text-xs text-gray-500">
-                Live tracking and uploaded-video analysis are currently implemented for push-ups, squats, and bicep curls.
+                Live tracking and uploaded-video analysis are currently implemented for push-ups, squats, bicep curls, and shoulder press.
               </p>
-              {selectedExercise === 'Bicep Curl' ? (
+              {selectedExercise === 'Bicep Curl' || selectedExercise === 'Shoulder Press' ? (
                 <div className="mt-3 rounded-md bg-amber-50 p-3 text-xs text-amber-900">
-                  Start a curl webcam session first, then point your micro:bit logger at the live session ID shown below so the backend can fuse accelerometer data with the curl tracker.
+                  Start a live session first, then point your micro:bit logger at the live session ID shown below so the backend can fuse accelerometer data with the tracker.
                 </div>
               ) : null}
             </CardContent>
           </Card>
 
-          {selectedExercise === 'Bicep Curl' ? (
+          {selectedExercise === 'Bicep Curl' || selectedExercise === 'Shoulder Press' ? (
             <Card>
               <CardHeader>
                 <CardTitle>Micro:bit Sensor</CardTitle>
-                <CardDescription>Live accelerometer fusion for curl sessions</CardDescription>
+                <CardDescription>
+                  Live accelerometer fusion for {selectedExercise === 'Bicep Curl' ? 'curl' : 'shoulder-press'} sessions
+                </CardDescription>
               </CardHeader>
               <CardContent className="space-y-3 text-sm">
                 <div className="flex items-center justify-between">
@@ -1309,7 +1352,7 @@ export function LiveTraining() {
                   <div>
                     <div className="mb-1 text-gray-500">Logger command</div>
                     <div className="break-all rounded-md bg-gray-100 p-2 font-mono text-xs">
-                      python logger.py --address &lt;MICROBIT_ADDRESS&gt; --prefix ian_curl_live --out data/curl --backend-ws ws://127.0.0.1:8000/ws/live/curl/sensor --session-id {sensorSessionId}
+                      python logger.py --address &lt;MICROBIT_ADDRESS&gt; --prefix {selectedExercise === 'Bicep Curl' ? 'ian_curl_live' : 'ian_shoulder_press_live'} --out {selectedExercise === 'Bicep Curl' ? 'data/curl' : 'data/shoulder_press'} --backend-ws ws://127.0.0.1:8000/ws/live/{selectedExercise === 'Bicep Curl' ? 'curl' : 'shoulder-press'}/sensor --session-id {sensorSessionId}
                     </div>
                   </div>
                 ) : null}
@@ -1431,13 +1474,17 @@ export function LiveTraining() {
                         Number(
                           selectedExercise === 'Squats'
                             ? (latestPrediction.features.min_knee_angle ?? 0)
+                            : selectedExercise === 'Shoulder Press'
+                              ? (latestPrediction.features.min_elbow_angle ?? 0)
                             : (latestPrediction.features.min_elbow_angle ?? 0),
                         ),
                       )}
                       °
                     </div>
                     <div className="rounded-md bg-gray-100 p-2">
-                      Angle drop: {Math.round(Number(latestPrediction.features.angle_drop ?? 0))}°
+                      {selectedExercise === 'Shoulder Press'
+                        ? `Height rise: ${Number(latestPrediction.features.height_rise ?? 0).toFixed(2)}`
+                        : `Angle drop: ${Math.round(Number(latestPrediction.features.angle_drop ?? 0))}°`}
                     </div>
                     <div className="rounded-md bg-gray-100 p-2">
                       Duration: {Number(latestPrediction.features.rep_duration_sec ?? 0).toFixed(2)}s
@@ -1447,6 +1494,8 @@ export function LiveTraining() {
                         ? `Torso angle: ${Number(latestPrediction.features.mean_torso_angle ?? 0).toFixed(1)}`
                         : selectedExercise === 'Bicep Curl'
                           ? `Shoulder drift: ${Number(latestPrediction.features.mean_shoulder_drift ?? 0).toFixed(2)}`
+                          : selectedExercise === 'Shoulder Press'
+                            ? `Torso drift: ${Number(latestPrediction.features.mean_torso_drift ?? 0).toFixed(2)}`
                         : `Alignment err: ${Number(latestPrediction.features.mean_body_alignment_error ?? 0).toFixed(1)}`}
                     </div>
                   </div>
@@ -1464,6 +1513,8 @@ export function LiveTraining() {
                   ? 'Squat Guide'
                   : selectedExercise === 'Bicep Curl'
                     ? 'Bicep Curl Guide'
+                    : selectedExercise === 'Shoulder Press'
+                      ? 'Shoulder Press Guide'
                     : 'Push-up Guide'}
               </CardTitle>
             </CardHeader>
@@ -1482,6 +1533,13 @@ export function LiveTraining() {
                     <p>2. Start with the arm lowered before the first curl.</p>
                     <p>3. Keep the upper arm quiet and avoid using torso momentum.</p>
                     <p>4. Lower the weight fully and control the descent before the next rep.</p>
+                  </>
+                ) : selectedExercise === 'Shoulder Press' ? (
+                  <>
+                    <p>1. Place the camera at your side so your shoulder, elbow, wrist, and torso stay visible.</p>
+                    <p>2. Start with the weight near shoulder level before the first rep.</p>
+                    <p>3. Press overhead to full lockout without leaning your torso back.</p>
+                    <p>4. Lower under control and keep the motion symmetrical side to side.</p>
                   </>
                 ) : (
                   <>

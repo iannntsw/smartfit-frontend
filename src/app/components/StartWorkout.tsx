@@ -25,7 +25,7 @@ type WorkoutExercise = {
 
 const exerciseOptions = [
   { name: 'Bicep Curl', icon: '💪', difficulty: 'Beginner' },
-  { name: 'Dumbbell Lat Raise', icon: '🏋️', difficulty: 'Beginner' },
+  { name: 'Shoulder Press', icon: '🏋️', difficulty: 'Intermediate' },
   { name: 'Push-ups', icon: '🤸', difficulty: 'Beginner' },
   { name: 'Squats', icon: '🦵', difficulty: 'Intermediate' },
 ];
@@ -52,6 +52,7 @@ export function StartWorkout() {
   const [selectedRoutineId, setSelectedRoutineId] = useState('');
   const [endWorkoutOpen, setEndWorkoutOpen] = useState(false);
   const [workoutName, setWorkoutName] = useState(buildDefaultWorkoutName());
+  const [isWorkoutActive, setIsWorkoutActive] = useState(false);
   const [isSavingWorkout, setIsSavingWorkout] = useState(false);
   const [completedSetKeys, setCompletedSetKeys] = useState<string[]>([]);
   const [hasLoadedDraft, setHasLoadedDraft] = useState(false);
@@ -68,12 +69,14 @@ export function StartWorkout() {
     if (!parsedDraft) {
       setWorkoutExercises([]);
       setWorkoutName(buildDefaultWorkoutName());
+      setIsWorkoutActive(false);
       setCompletedSetKeys([]);
       setHasLoadedDraft(true);
       return;
     }
     setWorkoutExercises(parsedDraft.workoutExercises ?? []);
     setWorkoutName(parsedDraft.workoutName ?? buildDefaultWorkoutName());
+    setIsWorkoutActive(parsedDraft.isWorkoutActive ?? false);
     setCompletedSetKeys(parsedDraft.completedSetKeys ?? []);
     setHasLoadedDraft(true);
   };
@@ -89,10 +92,11 @@ export function StartWorkout() {
     saveStartWorkoutDraft({
       workoutExercises,
       workoutName,
+      isWorkoutActive,
       completedSetKeys,
       setResults: readStartWorkoutDraft()?.setResults ?? {},
     });
-  }, [completedSetKeys, hasLoadedDraft, workoutExercises, workoutName]);
+  }, [completedSetKeys, hasLoadedDraft, isWorkoutActive, workoutExercises, workoutName]);
 
   useEffect(() => {
     if (!locationState.completedSet) {
@@ -113,6 +117,7 @@ export function StartWorkout() {
     saveStartWorkoutDraft({
       workoutExercises,
       workoutName,
+      isWorkoutActive,
       completedSetKeys,
       setResults: readStartWorkoutDraft()?.setResults ?? {},
     });
@@ -140,6 +145,7 @@ export function StartWorkout() {
       sets: exercise.sets,
     })));
     setWorkoutName(selectedRoutine.name);
+    setIsWorkoutActive(false);
     setCompletedSetKeys([]);
     saveStartWorkoutDraft({
       workoutExercises: selectedRoutine.exercises.map((exercise) => ({
@@ -147,6 +153,7 @@ export function StartWorkout() {
         sets: exercise.sets,
       })),
       workoutName: selectedRoutine.name,
+      isWorkoutActive: false,
       completedSetKeys: [],
       setResults: {},
     });
@@ -189,11 +196,20 @@ export function StartWorkout() {
   };
 
   const handleOpenEndWorkout = () => {
+    if (!isWorkoutActive) {
+      if (workoutExercises.length === 0) {
+        toast.error('Add at least one exercise before starting the workout.');
+        return;
+      }
+      setIsWorkoutActive(true);
+      toast.success('Workout started.');
+      return;
+    }
+
     if (workoutExercises.length === 0) {
       toast.error('Add at least one exercise before ending the workout.');
       return;
     }
-    setWorkoutName(buildDefaultWorkoutName());
     setEndWorkoutOpen(true);
   };
 
@@ -282,7 +298,7 @@ export function StartWorkout() {
           </div>
           <Button onClick={handleOpenEndWorkout}>
             <Calendar className="mr-2 h-4 w-4" />
-            End Workout
+            {isWorkoutActive ? 'End Workout' : 'Start Workout'}
           </Button>
         </div>
       </header>
@@ -337,7 +353,13 @@ export function StartWorkout() {
                               variant={isSetCompleted(exercise.name, index + 1) ? 'default' : 'outline'}
                               size="sm"
                               className={isSetCompleted(exercise.name, index + 1) ? 'bg-green-600 text-white hover:bg-green-600' : undefined}
-                              onClick={() => handleOpenSet(exercise.name, index + 1, exercise.sets)}
+                              onClick={() => {
+                                if (!isWorkoutActive) {
+                                  toast.error('Start the workout before opening sets.');
+                                  return;
+                                }
+                                handleOpenSet(exercise.name, index + 1, exercise.sets);
+                              }}
                             >
                               {isSetCompleted(exercise.name, index + 1) ? (
                                 <Check className="mr-2 h-4 w-4 text-white" />
