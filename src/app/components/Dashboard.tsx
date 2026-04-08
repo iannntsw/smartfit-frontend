@@ -26,7 +26,7 @@ type RoutineExerciseDraft = {
 
 const exerciseOptions: ExerciseOption[] = [
   { name: 'Bicep Curl', icon: '💪', difficulty: 'Beginner' },
-  { name: 'Dumbbell Lat Raise', icon: '🏋️', difficulty: 'Beginner' },
+  { name: 'Shoulder Press', icon: '🏋️', difficulty: 'Intermediate' },
   { name: 'Push-ups', icon: '🤸', difficulty: 'Beginner' },
   { name: 'Squats', icon: '🦵', difficulty: 'Intermediate' },
 ];

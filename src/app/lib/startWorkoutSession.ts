@@ -6,6 +6,7 @@ export type StartWorkoutExercise = {
 export type StartWorkoutDraft = {
   workoutExercises: StartWorkoutExercise[];
   workoutName: string;
+  isWorkoutActive: boolean;
   completedSetKeys: string[];
   setResults: Record<string, StartWorkoutSetResult>;
 };
@@ -181,7 +182,7 @@ export function markCompletedWorkoutSet(exerciseName: string, setNumber: number)
 
 export function hasActiveWorkoutSession() {
   const draft = readStartWorkoutDraft();
-  return Boolean(draft?.workoutExercises.length);
+  return Boolean(draft?.isWorkoutActive);
 }
 
 export function saveWorkoutSetResult(
