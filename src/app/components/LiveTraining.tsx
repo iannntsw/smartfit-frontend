@@ -6,6 +6,7 @@ import {
   ArrowLeft,
   Camera,
   CheckCircle2,
+  Copy,
   Pause,
   Play,
   RotateCcw,
@@ -21,6 +22,7 @@ import { Button } from './ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { Progress } from './ui/progress';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
+import { toast } from 'sonner';
 
 
 type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
@@ -33,10 +35,23 @@ type LatestPrediction = {
   features: Record<string, number | string>;
 };
 
+type SensorTracePoint = {
+  timestamp_sec: number;
+  accel_magnitude: number;
+  signal_energy?: number;
+  jerk_magnitude?: number;
+};
+
+type AngleTracePoint = {
+  timestamp_sec: number;
+  value: number;
+};
+
 type LiveEvent = {
   event: string;
   session_id?: string;
   frame_id?: number;
+  timestamp_sec?: number;
   rep_count: number;
   state: string;
   smoothed_elbow_angle?: number | null;
@@ -48,6 +63,7 @@ type LiveEvent = {
   active_arm?: string;
   sensor_status?: string;
   sensor_sample_count?: number;
+  sensor_trace?: SensorTracePoint[];
 };
 
 type CoachingResponse = {
@@ -120,6 +136,10 @@ function formatTrackerState(state: string) {
       return 'Waiting for bottom position';
     case 'waiting_top':
       return 'Waiting for top position';
+    case 'curling_up':
+      return 'Curling up';
+    case 'lowering_down':
+      return 'Lowering down';
     case 'ascending':
       return 'Tracking current rep';
     case 'descending':
@@ -144,6 +164,24 @@ function getExerciseSlug(exercise: string) {
 
 function getInitialTrackerState(exercise: string) {
   return exercise === 'Bicep Curl' || exercise === 'Shoulder Press' ? 'waiting_bottom' : 'waiting_top';
+}
+
+function buildPolylinePoints(values: number[], width: number, height: number) {
+  if (values.length === 0) {
+    return '';
+  }
+
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+
+  return values
+    .map((value, index) => {
+      const x = values.length === 1 ? width / 2 : (index / (values.length - 1)) * width;
+      const y = height - ((value - min) / range) * height;
+      return `${x},${y}`;
+    })
+    .join(' ');
 }
 
 function buildFeedbackMessages(
@@ -311,6 +349,7 @@ export function LiveTraining() {
   const uploadedVideoRef = useRef<HTMLVideoElement | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const frameIntervalRef = useRef<number | null>(null);
+  const poseStaleTimeoutRef = useRef<number | null>(null);
   const frameIdRef = useRef(0);
   const sessionStartRef = useRef<number>(0);
   const isTrackingRef = useRef(false);
@@ -335,6 +374,8 @@ export function LiveTraining() {
   const [sensorSessionId, setSensorSessionId] = useState<string | null>(null);
   const [sensorStatus, setSensorStatus] = useState<'waiting' | 'connected' | 'not_applicable'>('not_applicable');
   const [sensorSampleCount, setSensorSampleCount] = useState(0);
+  const [sensorTrace, setSensorTrace] = useState<SensorTracePoint[]>([]);
+  const [angleTrace, setAngleTrace] = useState<AngleTracePoint[]>([]);
   const [coachResponse, setCoachResponse] = useState<CoachingResponse | null>(null);
   const [coachLoading, setCoachLoading] = useState(false);
   const [coachError, setCoachError] = useState('');
@@ -346,6 +387,7 @@ export function LiveTraining() {
   const [backendError, setBackendError] = useState<string>('');
   const [uploadProcessing, setUploadProcessing] = useState(false);
   const [workoutSetRecorded, setWorkoutSetRecorded] = useState(false);
+  const [poseLost, setPoseLost] = useState(false);
 
   const stopFrameLoop = () => {
     if (frameIntervalRef.current !== null) {
@@ -354,8 +396,23 @@ export function LiveTraining() {
     }
   };
 
+  const clearPoseStaleTimeout = () => {
+    if (poseStaleTimeoutRef.current !== null) {
+      window.clearTimeout(poseStaleTimeoutRef.current);
+      poseStaleTimeoutRef.current = null;
+    }
+  };
+
+  const schedulePoseStaleTimeout = () => {
+    clearPoseStaleTimeout();
+    poseStaleTimeoutRef.current = window.setTimeout(() => {
+      setPoseLost(true);
+    }, 1200);
+  };
+
   const closeSocket = () => {
     stopFrameLoop();
+    clearPoseStaleTimeout();
     if (socketRef.current) {
       socketRef.current.close();
       socketRef.current = null;
@@ -737,21 +794,32 @@ export function LiveTraining() {
     const payload = JSON.parse(raw.data) as LiveEvent;
     setRepCount(payload.rep_count);
     setTrackerState(payload.state);
-    setLiveLandmarks(payload.landmarks ?? {});
+    if (payload.landmarks && Object.keys(payload.landmarks).length > 0) {
+      setLiveLandmarks(payload.landmarks);
+      setPoseLost(false);
+      schedulePoseStaleTimeout();
+    } else {
+      setLiveLandmarks({});
+      setPoseLost(true);
+    }
     if (payload.session_id) {
       setSensorSessionId(payload.session_id);
     }
     if (selectedExercise === 'Bicep Curl' || selectedExercise === 'Shoulder Press') {
       setSensorStatus((payload.sensor_status as 'waiting' | 'connected' | undefined) ?? 'waiting');
       setSensorSampleCount(payload.sensor_sample_count ?? 0);
+      setSensorTrace(payload.sensor_trace ?? []);
     }
-    setSmoothedPrimaryAngle(
+    const nextPrimaryAngle =
       selectedExercise === 'Squats'
         ? (payload.smoothed_knee_angle ?? null)
         : selectedExercise === 'Shoulder Press'
           ? (payload.smoothed_wrist_height ?? null)
-        : (payload.smoothed_elbow_angle ?? null),
-    );
+          : (payload.smoothed_elbow_angle ?? null);
+    setSmoothedPrimaryAngle(nextPrimaryAngle);
+    if (payload.timestamp_sec !== undefined && nextPrimaryAngle !== null && Number.isFinite(nextPrimaryAngle)) {
+      setAngleTrace((previous) => [...previous, { timestamp_sec: payload.timestamp_sec!, value: nextPrimaryAngle }].slice(-120));
+    }
 
     if (
       payload.latest_prediction &&
@@ -807,10 +875,11 @@ export function LiveTraining() {
 
     websocket.onopen = () => {
       setConnectionStatus('connected');
+      setPoseLost(true);
       sessionStartRef.current = performance.now();
       frameIdRef.current = 0;
       stopFrameLoop();
-      frameIntervalRef.current = window.setInterval(sendCurrentFrame, 300);
+      frameIntervalRef.current = window.setInterval(sendCurrentFrame, 180);
     };
 
     websocket.onmessage = handleSocketMessage;
@@ -841,6 +910,7 @@ export function LiveTraining() {
     setCurrentQuality(0);
     setLatestPrediction(null);
     setLiveLandmarks({});
+    setPoseLost(false);
     setUploadedFrames([]);
     setUploadedLandmarks({});
     predictionHistoryRef.current = [];
@@ -857,6 +927,8 @@ export function LiveTraining() {
     setSensorSessionId(null);
     setSensorStatus(selectedExercise === 'Bicep Curl' || selectedExercise === 'Shoulder Press' ? 'waiting' : 'not_applicable');
     setSensorSampleCount(0);
+    setSensorTrace([]);
+    setAngleTrace([]);
     setSessionComplete(false);
     if (!useWebcam) {
       void runUploadedVideoAnalysis();
@@ -872,6 +944,7 @@ export function LiveTraining() {
     setIsTracking(false);
     isTrackingRef.current = false;
     closeSocket();
+    setPoseLost(false);
       if (repCount > 0) {
         const sessionSummary = aggregateSessionPredictions(predictionHistoryRef.current);
         const nextPendingSession = buildPendingSession(repCount, sessionSummary, latestPrediction);
@@ -898,6 +971,18 @@ export function LiveTraining() {
     }
   };
 
+  const handleCopyLoggerCommand = async () => {
+    if (!loggerCommand) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(loggerCommand);
+      toast.success('Logger command copied.');
+    } catch {
+      toast.error('Unable to copy logger command.');
+    }
+  };
+
   const handleReset = () => {
     if (locationState.returnToWorkout && locationState.exercise && locationState.setNumber) {
       clearWorkoutSetResult(locationState.exercise, locationState.setNumber);
@@ -910,6 +995,7 @@ export function LiveTraining() {
     setFeedbackMessages([]);
     setLatestPrediction(null);
     setLiveLandmarks({});
+    setPoseLost(false);
     predictionHistoryRef.current = [];
     setSmoothedPrimaryAngle(null);
     setCoachResponse(null);
@@ -924,6 +1010,8 @@ export function LiveTraining() {
     setSensorSessionId(null);
     setSensorStatus('not_applicable');
     setSensorSampleCount(0);
+    setSensorTrace([]);
+    setAngleTrace([]);
     setBackendError('');
     setSessionComplete(false);
     setUploadedFile(null);
@@ -982,6 +1070,31 @@ export function LiveTraining() {
         : selectedExercise === 'Shoulder Press'
           ? 'No completed shoulder-press prediction yet.'
       : 'No completed rep prediction yet.';
+  const poseStatusLabel =
+    !useWebcam
+      ? 'Pose overlay unavailable in upload mode'
+      : !isTracking
+        ? 'Pose tracking idle'
+        : poseLost
+          ? 'Searching for pose'
+          : 'Pose locked';
+  const savedBleAddress = user?.sensorSetup?.bleAddress?.trim() ?? '';
+  const loggerCommand = sensorSessionId
+    ? `python logger.py --address ${savedBleAddress || '<MICROBIT_ADDRESS>'} --prefix ${selectedExercise === 'Bicep Curl' ? 'ian_curl_live' : 'ian_shoulder_press_live'} --out ${selectedExercise === 'Bicep Curl' ? 'data/curl' : 'data/shoulder_press'} --backend-ws ws://192.168.88.16:8000/ws/live/${selectedExercise === 'Bicep Curl' ? 'curl' : 'shoulder-press'}/sensor --session-id ${sensorSessionId}`
+    : '';
+  const recentSensorWindowSec =
+    sensorTrace.length > 1 ? Math.max(sensorTrace[sensorTrace.length - 1]!.timestamp_sec - sensorTrace[0]!.timestamp_sec, 0) : 0;
+  const latestSensorMagnitude = sensorTrace.length > 0 ? sensorTrace[sensorTrace.length - 1]!.accel_magnitude : null;
+  const sensorMagnitudePoints = buildPolylinePoints(
+    sensorTrace.map((sample) => sample.accel_magnitude),
+    320,
+    96,
+  );
+  const angleTracePoints = buildPolylinePoints(
+    angleTrace.map((sample) => sample.value),
+    320,
+    96,
+  );
   const routineContextLabel =
     locationState.routineName && locationState.setNumber && locationState.totalSets
       ? `${locationState.routineName} • ${selectedExercise} • Set ${locationState.setNumber} of ${locationState.totalSets}`
@@ -1062,7 +1175,12 @@ export function LiveTraining() {
               </div>
             </CardHeader>
             <CardContent>
-              <div className="relative aspect-video overflow-hidden rounded-lg bg-black">
+              <div
+                className="relative overflow-hidden rounded-lg bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.18),_rgba(15,23,42,0.96)_58%)]"
+                style={{
+                  aspectRatio: useWebcam ? '16 / 9' : `${uploadedVideoAspectRatio}`,
+                }}
+              >
                 {useWebcam ? (
                   <>
                     <Webcam
@@ -1070,17 +1188,19 @@ export function LiveTraining() {
                       audio={false}
                       mirrored
                       screenshotFormat="image/jpeg"
-                      screenshotQuality={0.7}
-                      className="h-full w-full object-cover"
+                      screenshotQuality={0.85}
+                      className="h-full w-full object-contain"
                       videoConstraints={{
                         facingMode: 'user',
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 },
                       }}
                     />
                     {Object.keys(liveLandmarks).length > 0 ? (
                       <svg
                         className="pointer-events-none absolute inset-0 h-full w-full"
                         viewBox="0 0 100 100"
-                        preserveAspectRatio="none"
+                        preserveAspectRatio="xMidYMid meet"
                       >
                         {POSE_CONNECTIONS.map(([startKey, endKey]) => {
                           const startPoint = liveLandmarks[startKey];
@@ -1180,6 +1300,12 @@ export function LiveTraining() {
                   </div>
                 )}
 
+                {useWebcam && isTracking && poseLost ? (
+                  <div className="absolute inset-x-4 top-16 rounded-lg bg-amber-500/90 px-4 py-3 text-sm text-white shadow-lg">
+                    No pose detected. Keep moving into frame and the tracker will resume automatically once your pose is visible again.
+                  </div>
+                ) : null}
+
                 {useWebcam ? (
                   <>
                     <div className="absolute right-4 top-4 rounded-lg bg-black/70 px-5 py-3 text-white">
@@ -1195,6 +1321,7 @@ export function LiveTraining() {
                       <Progress value={currentQuality} className="h-2" />
                       <div className="mt-3 flex flex-wrap gap-4 text-xs opacity-80">
                         <span>State: {formatTrackerState(trackerState)}</span>
+                        <span>Pose: {poseStatusLabel}</span>
                         <span>
                           {angleMetricLabel}:{' '}
                           {smoothedPrimaryAngle !== null ? `${Math.round(smoothedPrimaryAngle * (selectedExercise === 'Shoulder Press' ? 100 : 1))}${angleMetricUnit}` : 'N/A'}
@@ -1223,6 +1350,7 @@ export function LiveTraining() {
                   <Progress value={currentQuality} className="h-2" />
                   <div className="mt-3 flex flex-wrap gap-4 text-xs text-gray-600">
                     <span>State: {formatTrackerState(trackerState)}</span>
+                    <span>Pose: {poseStatusLabel}</span>
                     <span>
                       {angleMetricLabel}:{' '}
                       {smoothedPrimaryAngle !== null ? `${Math.round(smoothedPrimaryAngle * (selectedExercise === 'Shoulder Press' ? 100 : 1))}${angleMetricUnit}` : 'N/A'}
@@ -1348,14 +1476,88 @@ export function LiveTraining() {
                     {sensorSessionId ?? 'Start curl tracking to generate a session ID'}
                   </div>
                 </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-gray-500">Saved BLE address</span>
+                  <span className="font-mono text-xs">{savedBleAddress || 'Set this in Profile first'}</span>
+                </div>
                 {sensorSessionId ? (
                   <div>
-                    <div className="mb-1 text-gray-500">Logger command</div>
+                    <div className="mb-1 flex items-center justify-between text-gray-500">
+                      <span>Logger command</span>
+                      <Button type="button" variant="outline" size="sm" onClick={() => void handleCopyLoggerCommand()}>
+                        <Copy className="mr-2 h-4 w-4" />
+                        Copy
+                      </Button>
+                    </div>
                     <div className="break-all rounded-md bg-gray-100 p-2 font-mono text-xs">
-                      python logger.py --address &lt;MICROBIT_ADDRESS&gt; --prefix {selectedExercise === 'Bicep Curl' ? 'ian_curl_live' : 'ian_shoulder_press_live'} --out {selectedExercise === 'Bicep Curl' ? 'data/curl' : 'data/shoulder_press'} --backend-ws ws://127.0.0.1:8000/ws/live/{selectedExercise === 'Bicep Curl' ? 'curl' : 'shoulder-press'}/sensor --session-id {sensorSessionId}
+                      {loggerCommand}
                     </div>
                   </div>
                 ) : null}
+              </CardContent>
+            </Card>
+          ) : null}
+
+          {selectedExercise === 'Bicep Curl' || selectedExercise === 'Shoulder Press' ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>Live Motion Graph</CardTitle>
+                <CardDescription>
+                  Rolling view of sensor movement and {selectedExercise === 'Shoulder Press' ? 'press path' : 'curl path'} over the latest {recentSensorWindowSec > 0 ? `${recentSensorWindowSec.toFixed(1)}s` : 'few seconds'}
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div>
+                  <div className="mb-2 flex items-center justify-between text-xs text-gray-500">
+                    <span>Sensor acceleration magnitude</span>
+                    <span>{latestSensorMagnitude !== null ? latestSensorMagnitude.toFixed(1) : 'Waiting for sensor data'}</span>
+                  </div>
+                  <div className="rounded-lg border bg-white p-3">
+                    {sensorTrace.length > 1 ? (
+                      <svg viewBox="0 0 320 96" className="h-28 w-full">
+                        <polyline
+                          fill="none"
+                          stroke="rgb(249 115 22)"
+                          strokeWidth="3"
+                          strokeLinejoin="round"
+                          strokeLinecap="round"
+                          points={sensorMagnitudePoints}
+                        />
+                      </svg>
+                    ) : (
+                      <div className="flex h-28 items-center justify-center text-sm text-gray-400">
+                        Start the micro:bit logger to see incoming sensor motion.
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div>
+                  <div className="mb-2 flex items-center justify-between text-xs text-gray-500">
+                    <span>{angleMetricLabel}</span>
+                    <span>
+                      {smoothedPrimaryAngle !== null ? `${Math.round(smoothedPrimaryAngle * (selectedExercise === 'Shoulder Press' ? 100 : 1))}${angleMetricUnit}` : 'Waiting for pose'}
+                    </span>
+                  </div>
+                  <div className="rounded-lg border bg-white p-3">
+                    {angleTrace.length > 1 ? (
+                      <svg viewBox="0 0 320 96" className="h-28 w-full">
+                        <polyline
+                          fill="none"
+                          stroke="rgb(59 130 246)"
+                          strokeWidth="3"
+                          strokeLinejoin="round"
+                          strokeLinecap="round"
+                          points={angleTracePoints}
+                        />
+                      </svg>
+                    ) : (
+                      <div className="flex h-28 items-center justify-center text-sm text-gray-400">
+                        Start tracking to compare camera motion against the sensor trace.
+                      </div>
+                    )}
+                  </div>
+                </div>
               </CardContent>
             </Card>
           ) : null}
