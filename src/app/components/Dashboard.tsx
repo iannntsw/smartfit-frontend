@@ -475,7 +475,7 @@ export function Dashboard() {
               <div className="w-12 h-12 bg-purple-100 rounded-lg flex items-center justify-center mb-2">
                 <CreditCard className="w-6 h-6 text-purple-600" />
               </div>
-              <CardTitle className="text-lg">Upgrade</CardTitle>
+              <CardTitle className="text-lg">Plans</CardTitle>
               <CardDescription>
                 {user?.subscription === 'premium' ? 'Manage premium plan' : 'Unlock premium features'}
               </CardDescription>
