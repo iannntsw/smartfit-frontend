@@ -4,12 +4,16 @@ import Webcam from 'react-webcam';
 import {
   AlertCircle,
   ArrowLeft,
+  Bot,
   Camera,
   CheckCircle2,
   Copy,
+  Dumbbell,
+  MessageSquare,
   Pause,
   Play,
   RotateCcw,
+  Send,
   Upload,
   Wifi,
   WifiOff,
@@ -20,7 +24,6 @@ import { clearWorkoutSetResult, getWorkoutSetResult, markCompletedWorkoutSet, sa
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
-import { Progress } from './ui/progress';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { toast } from 'sonner';
 
@@ -95,6 +98,17 @@ type PendingSession = {
   drift: number;
 };
 
+type AggregatedPrediction = LatestPrediction & {
+  sensor_context: Record<string, number | string>;
+};
+
+type CoachQuestionResponse = {
+  exercise: string;
+  provider: string;
+  model: string;
+  answer: string;
+};
+
 type LiveTrainingLocationState = {
   exercise?: string;
   routineName?: string;
@@ -113,6 +127,8 @@ const CURL_WS_URL =
   import.meta.env.VITE_CURL_WS_URL ?? 'ws://127.0.0.1:8000/ws/live/curl';
 const SHOULDER_PRESS_WS_URL =
   import.meta.env.VITE_SHOULDER_PRESS_WS_URL ?? 'ws://127.0.0.1:8000/ws/live/shoulder-press';
+
+const DEVICE_IP = import.meta.env.VITE_DEVICE_IP ?? '192.168.88.16'
 
 const exercises = ['Push-ups', 'Squats', 'Bicep Curl', 'Shoulder Press'];
 const POSE_CONNECTIONS: Array<[string, string]> = [
@@ -293,7 +309,7 @@ function buildFeedbackMessages(
   return messages;
 }
 
-function aggregateSessionPredictions(predictions: LatestPrediction[]) {
+function aggregateSessionPredictions(predictions: LatestPrediction[]): AggregatedPrediction | null {
   if (predictions.length === 0) {
     return null;
   }
@@ -338,6 +354,58 @@ function aggregateSessionPredictions(predictions: LatestPrediction[]) {
   };
 }
 
+function buildCoachQuestionSensorContext(
+  sensorTrace: SensorTracePoint[],
+  sensorStatus: 'waiting' | 'connected' | 'not_applicable',
+  sensorSampleCount: number,
+) {
+  if (sensorStatus === 'not_applicable') {
+    return null;
+  }
+
+  if (sensorTrace.length === 0) {
+    return {
+      sensor_status: sensorStatus,
+      sensor_sample_count: sensorSampleCount,
+    };
+  }
+
+  const accelValues = sensorTrace.map((sample) => sample.accel_magnitude);
+  const energyValues = sensorTrace
+    .map((sample) => sample.signal_energy)
+    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+  const jerkValues = sensorTrace
+    .map((sample) => sample.jerk_magnitude)
+    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+
+  const average = (values: number[]) =>
+    values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+
+  return {
+    sensor_status: sensorStatus,
+    sensor_sample_count: sensorSampleCount,
+    sensor_window_sec:
+      sensorTrace.length > 1
+        ? Math.max(sensorTrace[sensorTrace.length - 1]!.timestamp_sec - sensorTrace[0]!.timestamp_sec, 0)
+        : 0,
+    mean_sensor_accel_magnitude: average(accelValues)?.toFixed(2) ?? 'n/a',
+    max_sensor_accel_magnitude: accelValues.length > 0 ? Math.max(...accelValues).toFixed(2) : 'n/a',
+    mean_sensor_signal_energy: average(energyValues)?.toFixed(2) ?? 'n/a',
+    mean_sensor_jerk_magnitude: average(jerkValues)?.toFixed(2) ?? 'n/a',
+  };
+}
+
+function getSuggestedCoachQuestions(exercise: string, predictedLabel?: string | null) {
+  const issueLabel = predictedLabel ? predictedLabel.replaceAll('_', ' ') : 'my latest form issue';
+
+  return [
+    'What was my biggest issue this session?',
+    `How do I fix ${issueLabel}?`,
+    `What should I focus on in my next ${exercise.toLowerCase()} set?`,
+    'Summarize my form in plain English.',
+  ];
+}
+
 export function LiveTraining() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -379,6 +447,10 @@ export function LiveTraining() {
   const [coachResponse, setCoachResponse] = useState<CoachingResponse | null>(null);
   const [coachLoading, setCoachLoading] = useState(false);
   const [coachError, setCoachError] = useState('');
+  const [coachQuestion, setCoachQuestion] = useState('');
+  const [coachQuestionAnswer, setCoachQuestionAnswer] = useState<CoachQuestionResponse | null>(null);
+  const [coachQuestionLoading, setCoachQuestionLoading] = useState(false);
+  const [coachQuestionError, setCoachQuestionError] = useState('');
   const [pendingSession, setPendingSession] = useState<PendingSession | null>(null);
   const [sessionSaved, setSessionSaved] = useState(false);
   const [saveSessionLoading, setSaveSessionLoading] = useState(false);
@@ -524,6 +596,10 @@ export function LiveTraining() {
       setCoachResponse(storedSet.result.coachResponse ?? null);
       setCoachError('');
       setCoachLoading(false);
+      setCoachQuestion('');
+      setCoachQuestionAnswer(null);
+      setCoachQuestionError('');
+      setCoachQuestionLoading(false);
       setPendingSession(
         storedSet.result.pendingSession
           ? {
@@ -611,6 +687,65 @@ export function LiveTraining() {
       setCoachError(error instanceof Error ? error.message : 'Unable to load coaching guidance.');
     } finally {
       setCoachLoading(false);
+    }
+  };
+
+  const requestCoachAnswer = async (
+    question: string,
+    prediction: LatestPrediction,
+    sensorContext: Record<string, number | string> | null = null,
+  ) => {
+    if (!isPremium) {
+      setCoachQuestionLoading(false);
+      setCoachQuestionError('');
+      setCoachQuestionAnswer(null);
+      return;
+    }
+
+    const trimmedQuestion = question.trim();
+    if (!trimmedQuestion) {
+      setCoachQuestionError('Ask a short question about your current session.');
+      return;
+    }
+
+    const exerciseSlug = getExerciseSlug(selectedExercise);
+    setCoachQuestionLoading(true);
+    setCoachQuestionError('');
+    try {
+      const response = await fetch(`${BACKEND_BASE_URL}/api/v1/coach/ask`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          exercise: exerciseSlug,
+          question: trimmedQuestion,
+          rep_index: prediction.rep_index,
+          predicted_label: prediction.predicted_label,
+          confidence: prediction.confidence,
+          features: prediction.features,
+          sensor_context: sensorContext,
+          existing_guidance: coachResponse
+            ? {
+                summary: coachResponse.summary,
+                priority: coachResponse.priority,
+                cues: coachResponse.cues,
+                safety_note: coachResponse.safety_note ?? null,
+              }
+            : null,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Coach question failed with status ${response.status}`);
+      }
+
+      const payload = (await response.json()) as CoachQuestionResponse;
+      setCoachQuestionAnswer(payload);
+    } catch (error) {
+      setCoachQuestionError(error instanceof Error ? error.message : 'Unable to get a coaching answer right now.');
+    } finally {
+      setCoachQuestionLoading(false);
     }
   };
 
@@ -721,6 +856,10 @@ export function LiveTraining() {
     setBackendError('');
     setCoachError('');
     setCoachResponse(null);
+    setCoachQuestion('');
+    setCoachQuestionAnswer(null);
+    setCoachQuestionError('');
+    setCoachQuestionLoading(false);
     setPendingSession(null);
     setSessionSaved(false);
     setWorkoutSetRecorded(false);
@@ -918,6 +1057,10 @@ export function LiveTraining() {
     setCoachResponse(null);
     setCoachError('');
     setCoachLoading(false);
+    setCoachQuestion('');
+    setCoachQuestionAnswer(null);
+    setCoachQuestionError('');
+    setCoachQuestionLoading(false);
     setPendingSession(null);
     setSessionSaved(false);
     setWorkoutSetRecorded(false);
@@ -1001,6 +1144,10 @@ export function LiveTraining() {
     setCoachResponse(null);
     setCoachError('');
     setCoachLoading(false);
+    setCoachQuestion('');
+    setCoachQuestionAnswer(null);
+    setCoachQuestionError('');
+    setCoachQuestionLoading(false);
     setPendingSession(null);
     setSessionSaved(false);
     setWorkoutSetRecorded(false);
@@ -1080,7 +1227,7 @@ export function LiveTraining() {
           : 'Pose locked';
   const savedBleAddress = user?.sensorSetup?.bleAddress?.trim() ?? '';
   const loggerCommand = sensorSessionId
-    ? `python logger.py --address ${savedBleAddress || '<MICROBIT_ADDRESS>'} --prefix ${selectedExercise === 'Bicep Curl' ? 'ian_curl_live' : 'ian_shoulder_press_live'} --out ${selectedExercise === 'Bicep Curl' ? 'data/curl' : 'data/shoulder_press'} --backend-ws ws://192.168.88.16:8000/ws/live/${selectedExercise === 'Bicep Curl' ? 'curl' : 'shoulder-press'}/sensor --session-id ${sensorSessionId}`
+    ? `python logger.py --address ${savedBleAddress || '<MICROBIT_ADDRESS>'} --prefix ${selectedExercise === 'Bicep Curl' ? 'ian_curl_live' : 'ian_shoulder_press_live'} --out ${selectedExercise === 'Bicep Curl' ? 'data/curl' : 'data/shoulder_press'} --backend-ws ws://${DEVICE_IP}:8000/ws/live/${selectedExercise === 'Bicep Curl' ? 'curl' : 'shoulder-press'}/sensor --session-id ${sensorSessionId}`
     : '';
   const recentSensorWindowSec =
     sensorTrace.length > 1 ? Math.max(sensorTrace[sensorTrace.length - 1]!.timestamp_sec - sensorTrace[0]!.timestamp_sec, 0) : 0;
@@ -1101,6 +1248,24 @@ export function LiveTraining() {
       : locationState.routineName
         ? `${locationState.routineName} • ${selectedExercise}`
         : null;
+  const currentSessionSummary = aggregateSessionPredictions(predictionHistoryRef.current);
+  const coachQuestionTarget = currentSessionSummary ?? latestPrediction;
+  const coachQuestionSensorContext = {
+    ...(currentSessionSummary?.sensor_context ?? {}),
+    ...(buildCoachQuestionSensorContext(sensorTrace, sensorStatus, sensorSampleCount) ?? {}),
+  };
+  const suggestedCoachQuestions = getSuggestedCoachQuestions(
+    selectedExercise,
+    coachQuestionTarget?.predicted_label ?? latestPrediction?.predicted_label ?? null,
+  );
+
+  const handleAskCoach = (question: string) => {
+    if (!coachQuestionTarget) {
+      setCoachQuestionError('Complete at least one rep before asking SmartFit Coach.');
+      return;
+    }
+    void requestCoachAnswer(question, coachQuestionTarget, coachQuestionSensorContext);
+  };
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -1314,12 +1479,7 @@ export function LiveTraining() {
                     </div>
 
                     <div className="absolute bottom-4 left-4 right-4 rounded-lg bg-black/70 p-4 text-white">
-                      <div className="mb-2 flex items-center justify-between text-sm">
-                        <span>Prediction Confidence</span>
-                        <span>{currentQuality}%</span>
-                      </div>
-                      <Progress value={currentQuality} className="h-2" />
-                      <div className="mt-3 flex flex-wrap gap-4 text-xs opacity-80">
+                      <div className="flex flex-wrap gap-4 text-xs opacity-80">
                         <span>State: {formatTrackerState(trackerState)}</span>
                         <span>Pose: {poseStatusLabel}</span>
                         <span>
@@ -1343,12 +1503,7 @@ export function LiveTraining() {
 
               {!useWebcam ? (
                 <div className="mt-4 rounded-lg border bg-white p-4">
-                  <div className="mb-2 flex items-center justify-between text-sm text-gray-700">
-                    <span>Prediction Confidence</span>
-                    <span>{currentQuality}%</span>
-                  </div>
-                  <Progress value={currentQuality} className="h-2" />
-                  <div className="mt-3 flex flex-wrap gap-4 text-xs text-gray-600">
+                  <div className="flex flex-wrap gap-4 text-xs text-gray-600">
                     <span>State: {formatTrackerState(trackerState)}</span>
                     <span>Pose: {poseStatusLabel}</span>
                     <span>
@@ -1364,7 +1519,14 @@ export function LiveTraining() {
 
               <div className="mt-4 flex gap-2">
                 {!isTracking ? (
-                  <Button onClick={handleStartTracking} className="flex-1">
+                  <Button
+                    onClick={handleStartTracking}
+                    className={`flex-1 transition-all ${
+                      !useWebcam && uploadProcessing
+                        ? 'border border-orange-300 bg-orange-500 text-white shadow-[0_0_24px_rgba(249,115,22,0.55)] animate-pulse hover:bg-orange-500'
+                        : ''
+                    }`}
+                  >
                     <Play className="mr-2 h-4 w-4" />
                     {useWebcam ? 'Start Tracking' : uploadProcessing ? 'Analyzing Video...' : 'Analyze Video'}
                   </Button>
@@ -1399,7 +1561,7 @@ export function LiveTraining() {
                       <p className={`text-sm ${sessionSaved ? 'text-green-700' : 'text-amber-700'}`}>
                         {workoutSetRecorded
                           ? 'This set is already counted in the current workout. Use session summary only if you also want it saved to profile history.'
-                          : `${repCount} reps recorded with ${currentQuality}% latest confidence.`}
+                          : `${repCount} reps recorded.`}
                       </p>
                     </div>
                   </div>
@@ -1420,83 +1582,43 @@ export function LiveTraining() {
               </CardContent>
             </Card>
           ) : null}
-        </div>
 
-        <div className="space-y-4">
           <Card>
             <CardHeader>
-              <CardTitle>Select Exercise</CardTitle>
+              <CardTitle>Real-time Feedback</CardTitle>
+              <CardDescription>Rule-based live feedback from backend predictions</CardDescription>
             </CardHeader>
             <CardContent>
-              <Select value={selectedExercise} onValueChange={setSelectedExercise}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {exercises.map((exercise) => (
-                    <SelectItem key={exercise} value={exercise}>
-                      {exercise}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <p className="mt-3 text-xs text-gray-500">
-                Live tracking and uploaded-video analysis are currently implemented for push-ups, squats, bicep curls, and shoulder press.
-              </p>
-              {selectedExercise === 'Bicep Curl' || selectedExercise === 'Shoulder Press' ? (
-                <div className="mt-3 rounded-md bg-amber-50 p-3 text-xs text-amber-900">
-                  Start a live session first, then point your micro:bit logger at the live session ID shown below so the backend can fuse accelerometer data with the tracker.
-                </div>
-              ) : null}
+              <div className="space-y-2">
+                {feedbackMessages.length > 0 ? (
+                  feedbackMessages.map((message, index) => (
+                    <div
+                      key={index}
+                      className={`rounded-lg p-3 text-sm ${
+                        message.toLowerCase().includes('correct') || message.toLowerCase().includes('solid')
+                          ? 'bg-green-100 text-green-800'
+                          : message.toLowerCase().includes('low confidence') ||
+                              message.toLowerCase().includes('placeholder')
+                            ? 'bg-yellow-100 text-yellow-800'
+                            : message.toLowerCase().includes('dropping') ||
+                                message.toLowerCase().includes('lower') ||
+                                message.toLowerCase().includes('deteriorating')
+                              ? 'bg-red-100 text-red-800'
+                              : 'bg-blue-100 text-blue-800'
+                      }`}
+                    >
+                      {message}
+                    </div>
+                  ))
+                ) : (
+                  <div className="py-8 text-center text-gray-400">
+                    <AlertCircle className="mx-auto mb-2 h-8 w-8 opacity-50" />
+                    <p className="text-sm">Start tracking to receive backend feedback.</p>
+                  </div>
+                )}
+              </div>
             </CardContent>
           </Card>
-
-          {selectedExercise === 'Bicep Curl' || selectedExercise === 'Shoulder Press' ? (
-            <Card>
-              <CardHeader>
-                <CardTitle>Micro:bit Sensor</CardTitle>
-                <CardDescription>
-                  Live accelerometer fusion for {selectedExercise === 'Bicep Curl' ? 'curl' : 'shoulder-press'} sessions
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-3 text-sm">
-                <div className="flex items-center justify-between">
-                  <span className="text-gray-500">Sensor status</span>
-                  <Badge variant={sensorStatus === 'connected' ? 'default' : 'secondary'}>
-                    {sensorStatus === 'connected' ? 'Connected' : 'Waiting'}
-                  </Badge>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-gray-500">Samples received</span>
-                  <span>{sensorSampleCount}</span>
-                </div>
-                <div>
-                  <div className="mb-1 text-gray-500">Live session ID</div>
-                  <div className="break-all rounded-md bg-gray-100 p-2 font-mono text-xs">
-                    {sensorSessionId ?? 'Start curl tracking to generate a session ID'}
-                  </div>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-gray-500">Saved BLE address</span>
-                  <span className="font-mono text-xs">{savedBleAddress || 'Set this in Profile first'}</span>
-                </div>
-                {sensorSessionId ? (
-                  <div>
-                    <div className="mb-1 flex items-center justify-between text-gray-500">
-                      <span>Logger command</span>
-                      <Button type="button" variant="outline" size="sm" onClick={() => void handleCopyLoggerCommand()}>
-                        <Copy className="mr-2 h-4 w-4" />
-                        Copy
-                      </Button>
-                    </div>
-                    <div className="break-all rounded-md bg-gray-100 p-2 font-mono text-xs">
-                      {loggerCommand}
-                    </div>
-                  </div>
-                ) : null}
-              </CardContent>
-            </Card>
-          ) : null}
 
           {selectedExercise === 'Bicep Curl' || selectedExercise === 'Shoulder Press' ? (
             <Card>
@@ -1564,43 +1686,6 @@ export function LiveTraining() {
 
           <Card>
             <CardHeader>
-              <CardTitle>Real-time Feedback</CardTitle>
-              <CardDescription>Rule-based live feedback from backend predictions</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-2">
-                {feedbackMessages.length > 0 ? (
-                  feedbackMessages.map((message, index) => (
-                    <div
-                      key={index}
-                      className={`rounded-lg p-3 text-sm ${
-                        message.toLowerCase().includes('correct') || message.toLowerCase().includes('solid')
-                          ? 'bg-green-100 text-green-800'
-                          : message.toLowerCase().includes('low confidence') ||
-                              message.toLowerCase().includes('placeholder')
-                            ? 'bg-yellow-100 text-yellow-800'
-                            : message.toLowerCase().includes('dropping') ||
-                                message.toLowerCase().includes('lower') ||
-                                message.toLowerCase().includes('deteriorating')
-                              ? 'bg-red-100 text-red-800'
-                              : 'bg-blue-100 text-blue-800'
-                      }`}
-                    >
-                      {message}
-                    </div>
-                  ))
-                ) : (
-                  <div className="py-8 text-center text-gray-400">
-                    <AlertCircle className="mx-auto mb-2 h-8 w-8 opacity-50" />
-                    <p className="text-sm">Start tracking to receive backend feedback.</p>
-                  </div>
-                )}
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
               <CardTitle>AI Coaching</CardTitle>
               <CardDescription>
                 {isPremium
@@ -1617,7 +1702,17 @@ export function LiveTraining() {
                   <Button onClick={() => navigate('/subscription')}>Upgrade to Premium</Button>
                 </div>
               ) : coachLoading ? (
-                <p className="text-sm text-gray-500">Generating coaching guidance...</p>
+                <div className="rounded-2xl border border-orange-200 bg-[radial-gradient(circle_at_top,_rgba(251,146,60,0.28),_rgba(255,255,255,0.98)_62%)] px-6 py-8 text-center">
+                  <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-full border border-orange-200 bg-white/90 shadow-[0_0_35px_rgba(251,146,60,0.45)] animate-pulse">
+                    <Dumbbell className="h-10 w-10 text-orange-500" />
+                  </div>
+                  <div className="mt-4 space-y-1">
+                    <p className="text-sm font-medium text-gray-900">Generating recommendations</p>
+                    <p className="text-sm text-gray-600">
+                      Reviewing your rep data and building coaching guidance now.
+                    </p>
+                  </div>
+                </div>
               ) : coachError ? (
                 <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
                   {coachError}
@@ -1647,6 +1742,117 @@ export function LiveTraining() {
               ) : (
                 <p className="text-sm text-gray-500">End the session to generate coaching guidance.</p>
               )}
+
+              {isPremium ? (
+                <div className="mt-5 border-t pt-5">
+                  <div className="mb-3 flex items-center gap-2">
+                    <div className="flex h-9 w-9 items-center justify-center rounded-full bg-blue-100 text-blue-700">
+                      <Bot className="h-4 w-4" />
+                    </div>
+                    <div>
+                      <p className="text-sm font-medium text-gray-900">Ask SmartFit Coach</p>
+                      <p className="text-xs text-gray-500">
+                        Follow-up questions grounded in your current {selectedExercise.toLowerCase()} session.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="mb-3 flex flex-wrap gap-2">
+                    {suggestedCoachQuestions.map((question) => (
+                      <button
+                        key={question}
+                        type="button"
+                        onClick={() => {
+                          setCoachQuestion(question);
+                          handleAskCoach(question);
+                        }}
+                        disabled={coachQuestionLoading || !coachQuestionTarget}
+                        className="rounded-full border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs text-blue-800 transition hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {question}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="rounded-xl border bg-gray-50 p-3">
+                    <label className="mb-2 flex items-center gap-2 text-xs font-medium text-gray-700">
+                      <MessageSquare className="h-3.5 w-3.5" />
+                      Your question
+                    </label>
+                    <textarea
+                      value={coachQuestion}
+                      onChange={(event) => setCoachQuestion(event.target.value)}
+                      placeholder="Ask about your latest rep, biggest issue, or what to focus on next."
+                      rows={3}
+                      className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 outline-none transition focus:border-blue-400"
+                    />
+                    <div className="mt-3 flex items-center justify-between gap-3">
+                      <p className="text-xs text-gray-500">
+                        {coachQuestionTarget
+                          ? `Using ${currentSessionSummary ? 'session summary' : 'latest completed rep'} context.`
+                          : 'Complete at least one rep to unlock session-aware questions.'}
+                      </p>
+                      <Button
+                        type="button"
+                        size="sm"
+                        onClick={() => handleAskCoach(coachQuestion)}
+                        disabled={coachQuestionLoading || !coachQuestionTarget || coachQuestion.trim().length === 0}
+                      >
+                        <Send className="mr-2 h-3.5 w-3.5" />
+                        {coachQuestionLoading ? 'Thinking...' : 'Ask Coach'}
+                      </Button>
+                    </div>
+                  </div>
+
+                  {coachQuestionError ? (
+                    <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                      {coachQuestionError}
+                    </div>
+                  ) : null}
+
+                  {coachQuestionAnswer ? (
+                    <div className="mt-3 rounded-xl border border-blue-200 bg-blue-50 px-4 py-4 text-sm text-blue-950">
+                      <div className="mb-2 flex items-center justify-between gap-3">
+                        <span className="font-medium">SmartFit Coach</span>
+                        <span className="text-xs text-blue-700">
+                          {coachQuestionAnswer.provider === 'openai' ? coachQuestionAnswer.model : 'Fallback coach'}
+                        </span>
+                      </div>
+                      <p>{coachQuestionAnswer.answer}</p>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+            </CardContent>
+          </Card>
+        </div>
+
+        <div className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>Select Exercise</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <Select value={selectedExercise} onValueChange={setSelectedExercise}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {exercises.map((exercise) => (
+                    <SelectItem key={exercise} value={exercise}>
+                      {exercise}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="mt-3 text-xs text-gray-500">
+                Live tracking and uploaded-video analysis are currently implemented for push-ups, squats, bicep curls, and shoulder press.
+              </p>
+              {selectedExercise === 'Bicep Curl' || selectedExercise === 'Shoulder Press' ? (
+                <div className="mt-3 rounded-md bg-amber-50 p-3 text-xs text-amber-900">
+                  Start a live session first, then point your micro:bit logger at the live session ID shown below so the backend can fuse accelerometer data with the tracker.
+                </div>
+              ) : null}
             </CardContent>
           </Card>
 
@@ -1664,10 +1870,6 @@ export function LiveTraining() {
                   <div className="flex items-center justify-between">
                     <span className="text-gray-500">Label</span>
                     <Badge>{latestPrediction.predicted_label}</Badge>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-gray-500">Confidence</span>
-                    <span>{Math.round(latestPrediction.confidence * 100)}%</span>
                   </div>
                   <div className="grid grid-cols-2 gap-2 pt-2 text-xs text-gray-600">
                     <div className="rounded-md bg-gray-100 p-2">
@@ -1754,6 +1956,53 @@ export function LiveTraining() {
               </div>
             </CardContent>
           </Card>
+
+          {selectedExercise === 'Bicep Curl' || selectedExercise === 'Shoulder Press' ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>Micro:bit Sensor</CardTitle>
+                <CardDescription>
+                  Live accelerometer fusion for {selectedExercise === 'Bicep Curl' ? 'curl' : 'shoulder-press'} sessions
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3 text-sm">
+                <div className="flex items-center justify-between">
+                  <span className="text-gray-500">Sensor status</span>
+                  <Badge variant={sensorStatus === 'connected' ? 'default' : 'secondary'}>
+                    {sensorStatus === 'connected' ? 'Connected' : 'Waiting'}
+                  </Badge>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-gray-500">Samples received</span>
+                  <span>{sensorSampleCount}</span>
+                </div>
+                <div>
+                  <div className="mb-1 text-gray-500">Live session ID</div>
+                  <div className="break-all rounded-md bg-gray-100 p-2 font-mono text-xs">
+                    {sensorSessionId ?? 'Start curl tracking to generate a session ID'}
+                  </div>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-gray-500">Saved BLE address</span>
+                  <span className="font-mono text-xs">{savedBleAddress || 'Set this in Profile first'}</span>
+                </div>
+                {sensorSessionId ? (
+                  <div>
+                    <div className="mb-1 flex items-center justify-between text-gray-500">
+                      <span>Logger command</span>
+                      <Button type="button" variant="outline" size="sm" onClick={() => void handleCopyLoggerCommand()}>
+                        <Copy className="mr-2 h-4 w-4" />
+                        Copy
+                      </Button>
+                    </div>
+                    <div className="break-all rounded-md bg-gray-100 p-2 font-mono text-xs">
+                      {loggerCommand}
+                    </div>
+                  </div>
+                ) : null}
+              </CardContent>
+            </Card>
+          ) : null}
         </div>
       </div>
     </div>
