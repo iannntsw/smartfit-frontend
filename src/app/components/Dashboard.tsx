@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
-import { Activity, Calendar, Camera, ChevronDown, CreditCard, Dumbbell, LogOut, Plus, Trash2, TrendingUp, User, X } from 'lucide-react';
+import { Activity, Bot, Calendar, Camera, ChevronDown, CreditCard, Dumbbell, LogOut, Plus, Sparkles, Trash2, TrendingUp, User, X } from 'lucide-react';
 import { Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Legend, Line, LineChart, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 
 import { useAuth } from '../contexts/AuthContext';
@@ -9,9 +9,11 @@ import { START_WORKOUT_UPDATED_EVENT, hasActiveWorkoutSession } from '../lib/sta
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from './ui/collapsible';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from './ui/dialog';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 
 type ExerciseOption = {
   name: string;
@@ -32,6 +34,15 @@ const exerciseOptions: ExerciseOption[] = [
 ];
 
 const chartColors = ['#4f46e5', '#0f766e', '#ea580c', '#db2777', '#0891b2', '#65a30d'];
+const BACKEND_BASE_URL = import.meta.env.VITE_BACKEND_BASE_URL ?? 'http://127.0.0.1:8000';
+
+type FormTrendInsightResponse = {
+  provider: string;
+  model: string;
+  insight: string;
+};
+
+type TrendRange = '30d' | '3m' | '6m' | '1y' | 'all';
 
 export function Dashboard() {
   const { user, logout, addWorkoutRoutine, updateWorkoutRoutine, deleteWorkoutRoutine } = useAuth();
@@ -45,6 +56,12 @@ export function Dashboard() {
   const [editingRoutineKey, setEditingRoutineKey] = useState('');
   const [deletingRoutineId, setDeletingRoutineId] = useState('');
   const [hasWorkoutInProgress, setHasWorkoutInProgress] = useState(false);
+  const [formTrendInsight, setFormTrendInsight] = useState<FormTrendInsightResponse | null>(null);
+  const [formTrendInsightLoading, setFormTrendInsightLoading] = useState(false);
+  const [formTrendInsightError, setFormTrendInsightError] = useState('');
+  const [isFormTrendInsightOpen, setIsFormTrendInsightOpen] = useState(false);
+  const [selectedTrendExercise, setSelectedTrendExercise] = useState('all');
+  const [selectedTrendRange, setSelectedTrendRange] = useState<TrendRange>('30d');
 
   const exerciseConfigByName = useMemo(
     () => Object.fromEntries(exerciseOptions.map((exercise) => [exercise.name, exercise])),
@@ -94,17 +111,46 @@ export function Dashboard() {
     };
   }, [exerciseHistory, workoutHistory]);
 
+  const trendExerciseOptions = useMemo(
+    () => ['all', ...Array.from(new Set(exerciseHistory.map((session) => session.exercise)))],
+    [exerciseHistory],
+  );
+
+  const filteredTrendSessions = useMemo(() => {
+    const now = new Date();
+    const cutoff = new Date(now);
+
+    if (selectedTrendRange === '30d') {
+      cutoff.setDate(cutoff.getDate() - 30);
+    } else if (selectedTrendRange === '3m') {
+      cutoff.setMonth(cutoff.getMonth() - 3);
+    } else if (selectedTrendRange === '6m') {
+      cutoff.setMonth(cutoff.getMonth() - 6);
+    } else if (selectedTrendRange === '1y') {
+      cutoff.setFullYear(cutoff.getFullYear() - 1);
+    }
+
+    return exerciseHistory
+      .filter((session) => selectedTrendExercise === 'all' || session.exercise === selectedTrendExercise)
+      .filter((session) => selectedTrendRange === 'all' || session.date >= cutoff)
+      .sort((left, right) => left.date.getTime() - right.date.getTime());
+  }, [exerciseHistory, selectedTrendExercise, selectedTrendRange]);
+
   const qualityTrendData = useMemo(
     () =>
-      exerciseHistory.slice(-10).map((session, index) => ({
-        label: session.date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+      filteredTrendSessions.map((session, index) => ({
+        label: session.date.toLocaleDateString(undefined, {
+          month: 'short',
+          day: 'numeric',
+          ...(selectedTrendRange === '1y' || selectedTrendRange === 'all' ? { year: '2-digit' } : {}),
+        }),
         quality: Math.round(session.quality),
         drift: Math.round(session.drift),
         reps: session.reps,
         exercise: session.exercise,
         index: index + 1,
       })),
-    [exerciseHistory],
+    [filteredTrendSessions, selectedTrendRange],
   );
 
   const weeklyLoadData = useMemo(() => {
@@ -200,6 +246,12 @@ export function Dashboard() {
       window.removeEventListener('focus', syncWorkoutDraftState);
     };
   }, []);
+
+  useEffect(() => {
+    setFormTrendInsight(null);
+    setFormTrendInsightError('');
+    setIsFormTrendInsightOpen(false);
+  }, [selectedTrendExercise, selectedTrendRange]);
 
   const handleLogout = () => {
     logout();
@@ -396,6 +448,44 @@ export function Dashboard() {
     navigate('/subscription');
   };
 
+  const handleGenerateFormTrendInsight = async () => {
+    if (user?.subscription !== 'premium') {
+      navigate('/subscription');
+      return;
+    }
+
+    if (qualityTrendData.length < 2) {
+      setFormTrendInsightError('Complete at least two tracked sessions to generate trend insights.');
+      return;
+    }
+
+    setFormTrendInsightLoading(true);
+    setFormTrendInsightError('');
+    try {
+      const response = await fetch(`${BACKEND_BASE_URL}/api/v1/coach/form-trend-insight`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          trend_points: qualityTrendData,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Form trend insight failed with status ${response.status}`);
+      }
+
+      const payload = (await response.json()) as FormTrendInsightResponse;
+      setFormTrendInsight(payload);
+      setIsFormTrendInsightOpen(true);
+    } catch (error) {
+      setFormTrendInsightError(error instanceof Error ? error.message : 'Unable to generate form trend insights right now.');
+    } finally {
+      setFormTrendInsightLoading(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gray-50">
       <header className="bg-white border-b">
@@ -531,7 +621,143 @@ export function Dashboard() {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+                <div className="rounded-xl border bg-white p-4">
+                  <div className="mb-4 flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+                    <div>
+                      <h3>Form Trend</h3>
+                      <p className="text-sm text-gray-500">Compare rep quality against drift across your selected exercise and time window</p>
+                    </div>
+                    <div className="flex flex-col gap-3 sm:flex-row">
+                      <div className="min-w-[180px]">
+                        <p className="mb-1 text-xs text-gray-500">Exercise</p>
+                        <Select value={selectedTrendExercise} onValueChange={setSelectedTrendExercise}>
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {trendExerciseOptions.map((exercise) => (
+                              <SelectItem key={exercise} value={exercise}>
+                                {exercise === 'all' ? 'All exercises' : exercise}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="min-w-[160px]">
+                        <p className="mb-1 text-xs text-gray-500">Time range</p>
+                        <Select value={selectedTrendRange} onValueChange={(value) => setSelectedTrendRange(value as TrendRange)}>
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="30d">Past 30 days</SelectItem>
+                            <SelectItem value="3m">Past 3 months</SelectItem>
+                            <SelectItem value="6m">Past 6 months</SelectItem>
+                            <SelectItem value="1y">Past 1 year</SelectItem>
+                            <SelectItem value="all">All time</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="xl:self-end">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant={user?.subscription === 'premium' ? 'default' : 'outline'}
+                          onClick={() => void handleGenerateFormTrendInsight()}
+                          disabled={formTrendInsightLoading || qualityTrendData.length < 2}
+                          className={`shrink-0 transition-all ${
+                            formTrendInsightLoading
+                              ? 'border border-cyan-300 bg-cyan-500 text-white shadow-[0_0_24px_rgba(34,211,238,0.5)] animate-pulse hover:bg-cyan-500'
+                              : ''
+                          }`}
+                        >
+                          {user?.subscription === 'premium' ? (
+                            <>
+                              <Sparkles className="mr-2 h-4 w-4" />
+                              {formTrendInsightLoading ? 'Generating...' : 'Generate Insights'}
+                            </>
+                          ) : (
+                            <>
+                              <Bot className="mr-2 h-4 w-4" />
+                              Unlock AI Insights
+                            </>
+                          )}
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                  {qualityTrendData.length > 0 ? (
+                    <ResponsiveContainer width="100%" height={320}>
+                      <LineChart data={qualityTrendData}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="label" minTickGap={20} />
+                        <YAxis domain={[0, 100]} />
+                        <Tooltip />
+                        <Legend />
+                        <Line type="monotone" dataKey="quality" stroke="#4f46e5" strokeWidth={3} name="Quality %" />
+                        <Line type="monotone" dataKey="drift" stroke="#ef4444" strokeWidth={2} name="Drift %" />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <div className="flex h-80 items-center justify-center rounded-xl border border-dashed bg-gray-50 text-sm text-gray-500">
+                      No sessions match the selected exercise and time range.
+                    </div>
+                  )}
+                  {formTrendInsightError ? (
+                    <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                      {formTrendInsightError}
+                    </div>
+                  ) : null}
+                  {(formTrendInsight || user?.subscription !== 'premium') ? (
+                    <Collapsible
+                      open={isFormTrendInsightOpen}
+                      onOpenChange={setIsFormTrendInsightOpen}
+                    >
+                      <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50">
+                        <CollapsibleTrigger asChild>
+                          <button
+                            type="button"
+                            className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
+                          >
+                            <div className="flex items-center gap-2">
+                              <Bot className="h-4 w-4 text-cyan-700" />
+                              <span className="text-sm font-medium text-gray-900">
+                                {formTrendInsight ? 'AI Form Insight' : 'AI Form Insight Preview'}
+                              </span>
+                            </div>
+                            <ChevronDown
+                              className={`h-4 w-4 text-gray-500 transition-transform ${
+                                isFormTrendInsightOpen ? 'rotate-180' : ''
+                              }`}
+                            />
+                          </button>
+                        </CollapsibleTrigger>
+                        <CollapsibleContent className="border-t px-4 py-4">
+                          {formTrendInsight ? (
+                            <div className="rounded-xl border border-cyan-200 bg-cyan-50 px-4 py-4">
+                              <div className="mb-2 flex items-center justify-between gap-3">
+                                <div className="flex items-center gap-2 text-cyan-950">
+                                  <Bot className="h-4 w-4" />
+                                  <span className="text-sm font-medium">SmartFit Trend Coach</span>
+                                </div>
+                                <span className="text-xs text-cyan-700">
+                                  {formTrendInsight.provider === 'openai' ? formTrendInsight.model : 'Fallback coach'}
+                                </span>
+                              </div>
+                              <p className="text-sm text-cyan-950">{formTrendInsight.insight}</p>
+                            </div>
+                          ) : (
+                            <div className="rounded-xl border border-dashed border-gray-200 bg-white px-4 py-4 text-sm text-gray-600">
+                              Upgrade to Premium to turn your filtered form trend view into a short AI summary with one concrete next step.
+                            </div>
+                          )}
+                        </CollapsibleContent>
+                      </div>
+                    </Collapsible>
+                  ) : null}
+                </div>
+
+                <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
                   <div className="rounded-xl border bg-white p-4">
                     <div className="mb-4">
                       <h3>Weekly Training Load</h3>
@@ -553,24 +779,6 @@ export function Dashboard() {
                         <Area type="monotone" dataKey="reps" stroke="#4f46e5" fill="url(#repsGradient)" name="Total reps" />
                         <Line type="monotone" dataKey="workouts" stroke="#0f766e" strokeWidth={2} name="Logged sessions" />
                       </AreaChart>
-                    </ResponsiveContainer>
-                  </div>
-
-                  <div className="rounded-xl border bg-white p-4">
-                    <div className="mb-4">
-                      <h3>Form Trend</h3>
-                      <p className="text-sm text-gray-500">Compare rep quality against drift over your most recent sessions</p>
-                    </div>
-                    <ResponsiveContainer width="100%" height={280}>
-                      <LineChart data={qualityTrendData}>
-                        <CartesianGrid strokeDasharray="3 3" />
-                        <XAxis dataKey="label" />
-                        <YAxis domain={[0, 100]} />
-                        <Tooltip />
-                        <Legend />
-                        <Line type="monotone" dataKey="quality" stroke="#4f46e5" strokeWidth={3} name="Quality %" />
-                        <Line type="monotone" dataKey="drift" stroke="#ef4444" strokeWidth={2} name="Drift %" />
-                      </LineChart>
                     </ResponsiveContainer>
                   </div>
 
